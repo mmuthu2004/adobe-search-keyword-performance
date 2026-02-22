@@ -127,8 +127,7 @@ def handler(event, context=None):
 
     # ── Lineage ───────────────────────────────────────────────────────
     duration = time.time() - start_ts
-    lineage.record(
-        run_id=run_id,
+    lineage.record(run_id=run_id,
         input_file=f"s3://{bucket}/{key}",
         input_rows=input_rows,
         output_file=s3_output_uri or local_output,
