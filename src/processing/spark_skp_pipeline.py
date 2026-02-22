@@ -361,9 +361,9 @@ def extract_purchase_rows(df):
             F.lit(PURCHASE_EVENT_ID)
         )
     ).filter(
-        F.col("product_list").isNotNull() &
-        (F.trim(F.col("product_list")) != "") &
-        (F.trim(F.col("product_list")) != "nan")
+        F.col("product_list").isNotNull()
+        & (F.trim(F.col("product_list")) != "")
+        & (F.trim(F.col("product_list")) != "nan")
     )
 
     # ── Parse revenue from product_list using UDF ─────────────────────
