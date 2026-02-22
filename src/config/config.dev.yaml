@@ -1,0 +1,17 @@
+# config.dev.yaml — Dev environment overrides
+aws:
+  s3:
+    bucket_raw:       "skp-raw-dev-099622553872"
+    bucket_processed: "skp-processed-dev-099622553872"
+    bucket_logs:      "skp-logs-dev-099622553872"
+
+processing:
+  small_file_threshold_mb: 100
+
+logging:
+  level: DEBUG
+  structured: false
+
+lineage:
+  enabled: true
+  store: local
