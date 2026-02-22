@@ -1,0 +1,232 @@
+name: SKP CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  PYTHON_VERSION: "3.13"
+  AWS_REGION: "us-east-1"
+  LAMBDA_FUNCTION_NAME: "skp-search-keyword-performance"
+  S3_RAW_BUCKET: "skp-raw-dev-099622553872"
+  S3_PROCESSED_BUCKET: "skp-processed-dev-099622553872"
+  APP_ENV: "dev"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # JOB 1 — CI: Test and Quality Checks
+  # Runs on: every push and pull request
+  # ────────────────────────────────────────────────────────────────
+  ci:
+    name: "CI — Test & Quality"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml boto3 pytest flake8
+
+      # Step 4: Code quality check
+      - name: Code quality check (flake8)
+        run: |
+          echo "Running flake8 code quality checks (v2)..."
+          flake8 src/ --max-line-length=120 --exclude=__pycache__ --ignore=E121,E122,E123,E124,E125,E126,E127,E128,E221,E226,E231,E241,E272,E301,E302,E402,F401 --statistics
+        continue-on-error: false
+
+      # Step 5: Run unit tests
+      - name: Run unit tests
+        env:
+          APP_ENV: dev
+          PROCESSED_BUCKET: ""
+          LOGS_BUCKET: ""
+        run: |
+          echo "Running unit tests..."
+          PYTHONPATH=src python -m pytest tests/unit/ -v --tb=short
+
+      # Step 6: Run integration tests
+      - name: Run integration tests
+        env:
+          APP_ENV: dev
+          PROCESSED_BUCKET: ""
+          LOGS_BUCKET: ""
+        run: |
+          echo "Running integration tests..."
+          PYTHONPATH=src python -m pytest tests/integration/ -v --tb=short
+
+      # Step 7: Build Lambda package
+      - name: Build Lambda deployment package
+        run: |
+          echo "Building Lambda package..."
+          mkdir -p lambda_package
+          cp -r src/* lambda_package/
+          pip install pyyaml \
+            --platform manylinux2014_x86_64 \
+            --target lambda_package/ \
+            --implementation cp \
+            --python-version 3.13 \
+            --only-binary=:all: \
+            --upgrade
+          cd lambda_package
+          zip -r ../skp_lambda.zip . -x "*.pyc" -x "*/__pycache__/*"
+          cd ..
+          echo "Package size: $(du -sh skp_lambda.zip)"
+
+      # Step 8: Upload Lambda zip as artifact (for CD job to use)
+      - name: Upload Lambda zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skp-lambda-zip
+          path: skp_lambda.zip
+          retention-days: 1
+
+      # Step 9: Summary
+      - name: CI Summary
+        run: |
+          echo "========================================"
+          echo "CI PASSED"
+          echo "Branch : ${{ github.ref_name }}"
+          echo "Commit : ${{ github.sha }}"
+          echo "========================================"
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 2 — CD: Deploy to AWS Lambda
+  # Runs on: push to main branch only (after CI passes)
+  # ────────────────────────────────────────────────────────────────
+  cd:
+    name: "CD — Deploy to AWS"
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Download Lambda zip from CI job
+      - name: Download Lambda zip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: skp-lambda-zip
+
+      # Step 3: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 4: Upload Lambda zip to S3
+      - name: Upload Lambda zip to S3
+        run: |
+          echo "Uploading Lambda package to S3..."
+          aws s3 cp skp_lambda.zip s3://${{ env.S3_RAW_BUCKET }}/lambda/skp_lambda.zip
+          echo "Upload complete."
+
+      # Step 5: Deploy to Lambda
+      - name: Deploy to Lambda
+        run: |
+          echo "Deploying to Lambda..."
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --s3-bucket ${{ env.S3_RAW_BUCKET }} \
+            --s3-key lambda/skp_lambda.zip
+          echo "Waiting for Lambda to be ready..."
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
+          echo "Lambda deployment complete."
+
+      # Step 6: Smoke test — invoke Lambda with sample file
+      - name: Smoke test
+        run: |
+          echo "Running smoke test..."
+
+          # Upload sample file to S3
+          aws s3 cp tests/data/hit_data.tab s3://${{ env.S3_RAW_BUCKET }}/raw/hit_data.tab
+
+          # Create invoke payload
+          cat > payload.json << 'EOF'
+          {
+            "Records": [{
+              "s3": {
+                "bucket": { "name": "skp-raw-dev-099622553872" },
+                "object": { "key": "raw/hit_data.tab" }
+              }
+            }]
+          }
+          EOF
+
+          # Invoke Lambda
+          aws lambda invoke \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --payload file://payload.json \
+            --cli-binary-format raw-in-base64-out \
+            response.json
+
+          # Check response
+          cat response.json
+          STATUS=$(python3 -c "import json; d=json.load(open('response.json')); print(d.get('statusCode',0))")
+
+          if [ "$STATUS" = "200" ]; then
+            echo "Smoke test PASSED — statusCode: 200"
+          else
+            echo "Smoke test FAILED — statusCode: $STATUS"
+            exit 1
+          fi
+
+      # Step 7: Verify output in S3
+      - name: Verify output in S3
+        run: |
+          echo "Verifying output file in S3..."
+          TODAY=$(date +%Y-%m-%d)
+          OUTPUT_KEY="processed/${TODAY}_SearchKeywordPerformance.tab"
+
+          aws s3 cp s3://${{ env.S3_PROCESSED_BUCKET }}/${OUTPUT_KEY} result.tab
+
+          echo ""
+          echo "========================================"
+          echo "PIPELINE RESULTS"
+          echo "========================================"
+          cat result.tab
+          echo "========================================"
+
+          # Verify ground truth
+          if grep -q "google.com" result.tab && grep -q "480" result.tab; then
+            echo "Ground truth verification PASSED"
+          else
+            echo "Ground truth verification FAILED"
+            exit 1
+          fi
+
+      # Step 8: CD Summary
+      - name: CD Summary
+        run: |
+          echo "========================================"
+          echo "DEPLOYMENT COMPLETE"
+          echo "Branch  : ${{ github.ref_name }}"
+          echo "Commit  : ${{ github.sha }}"
+          echo "Lambda  : ${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "========================================"
