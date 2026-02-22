@@ -1,0 +1,22 @@
+notepad .flake8
+```
+
+Click **Yes** to create. Paste this:
+```
+[flake8]
+max-line-length = 120
+exclude = 
+    __pycache__,
+    venv,
+    lambda_package,
+    .git
+ignore =
+    E221,
+    E231,
+    E272,
+    E301,
+    E302,
+    E402,
+    F401
+per-file-ignores =
+    src/lambda_handler.py:E402,F401
