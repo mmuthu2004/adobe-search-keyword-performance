@@ -1,0 +1,40 @@
+# =============================================================================
+# Environment Override — PRODUCTION
+# Full resource allocation. All safety checks enabled.
+# =============================================================================
+
+data_quality:
+  fail_on_schema_error: true
+  fail_on_null_critical: true
+  emit_quality_report: true
+
+processing:
+  small_file_threshold_mb: 1024
+  spark:
+    num_partitions: 200
+    executor_memory: "4g"
+    driver_memory: "2g"
+    executor_cores: 4
+    dynamic_allocation: true
+    log_level: "WARN"
+
+aws:
+  region: "us-east-1"
+  s3:
+    bucket_raw: "skp-raw-prod"
+    bucket_processed: "skp-processed-prod"
+    bucket_archive: "skp-archive-prod"
+    bucket_logs: "skp-logs-prod"
+  lambda:
+    timeout_seconds: 300
+    memory_mb: 1024             # Higher memory in prod for safety
+  cloudwatch:
+    log_group: "/skp/search-keyword-performance/prod"
+
+logging:
+  level: "INFO"
+  structured: true              # JSON logs for CloudWatch Insights queries
+
+lineage:
+  enabled: true
+  store: "s3"

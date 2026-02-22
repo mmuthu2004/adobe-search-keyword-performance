@@ -1,0 +1,26 @@
+# Virtual environment
+venv/
+
+# Lambda packages and zips
+lambda_package/
+layer/
+skp_lambda.zip
+skp_lambda_v2.zip
+
+# AWS policy files (sensitive)
+lambda-s3-policy.json
+lambda-trust-policy.json
+
+# Test outputs
+output.tab
+response.json
+cloudwatch_logs.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+*.env

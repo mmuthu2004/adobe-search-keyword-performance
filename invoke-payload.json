@@ -1,0 +1,8 @@
+{
+  "Records": [{
+    "s3": {
+      "bucket": { "name": "skp-raw-dev-099622553872" },
+      "object": { "key": "raw/hit_data.tab" }
+    }
+  }]
+}

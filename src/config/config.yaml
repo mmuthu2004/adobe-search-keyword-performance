@@ -1,0 +1,356 @@
+# =============================================================================
+# Adobe Analytics — Search Keyword Performance Platform
+# Master Configuration File
+# =============================================================================
+# All business rules, thresholds, paths, and environment settings live here.
+# NO values are hardcoded in the application code.
+#
+# Environment-specific overrides live in:
+#   config.dev.yaml      → local development
+#   config.staging.yaml  → staging / QA
+#   config.prod.yaml     → production
+#
+# Sensitive values (ARNs, IDs) are injected via environment variables
+# using the ${VAR_NAME} syntax — never stored in this file.
+#
+# Author  : Principal Data Engineer, ACS Data Engineering
+# Version : 1.0
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 1. BUSINESS RULES
+# All rules confirmed during Step 1 — Data Profiling.
+# Changes here flow automatically into all processing paths (Pandas + PySpark).
+# -----------------------------------------------------------------------------
+business_rules:
+
+  # Adobe Analytics event ID that actualizes revenue.
+  # Revenue in product_list is ONLY counted when this event is present.
+  # Source: Adobe Analytics documentation + confirmed in data profiling.
+  purchase_event_id: "1"
+
+  # External search engine domains to track.
+  # Any referrer whose hostname normalizes to one of these domains
+  # is treated as a search engine entry point.
+  # Add/remove domains here without touching any code.
+  search_engine_domains:
+    - "google.com"
+    - "yahoo.com"
+    - "msn.com"
+    - "bing.com"
+    - "ask.com"
+    - "aol.com"
+
+  # URL query string parameters used by search engines to carry the keyword.
+  # Checked in order — first match wins.
+  # google.com / bing.com / msn.com → q
+  # yahoo.com                       → p
+  keyword_query_params:
+    - "q"
+    - "p"
+    - "query"
+    - "text"
+    - "s"
+    - "qs"
+
+  # Column used to identify a visitor session across multiple hits.
+  # IP address is the best available key in this dataset.
+  # Future: replace with visitor_id or cookie column if available.
+  session_key_column: "ip"
+
+  # Attribution model for crediting revenue to a search keyword.
+  # Options:
+  #   first_touch  → First search engine entry in session gets full credit (SELECTED)
+  #   last_touch   → Last search engine touch before purchase gets credit
+  #   linear       → Revenue split equally across all search touches in session
+  attribution_model: "first_touch"
+
+  # product_list is semicolon-delimited. Revenue is at this 0-based index.
+  # Format: [Category];[Product Name];[Qty];[Revenue];[Events];[eVar]
+  #                      0             1     2    3        4       5
+  revenue_column_index: 3
+
+  # Delimiter between individual products in product_list
+  product_delimiter: ","
+
+  # Delimiter between attributes within a single product entry
+  product_attr_delimiter: ";"
+
+  # Delimiter between event IDs in event_list
+  event_delimiter: ","
+
+  # Normalize search keywords to lowercase before aggregation.
+  # Prevents "Ipod" and "ipod" being counted as separate keywords.
+  # Set to false ONLY if client explicitly requires case-sensitive grouping.
+  keyword_normalize_case: true
+
+  # Minimum revenue value (exclusive) to include a row in the output.
+  # Rows with revenue = 0 are excluded even if purchase event is present.
+  min_revenue_threshold: 0.0
+
+
+# -----------------------------------------------------------------------------
+# 2. INPUT FILE SETTINGS
+# Controls how the raw hit-level data file is read and validated.
+# -----------------------------------------------------------------------------
+input:
+
+  # Column delimiter for the hit-level data file
+  file_delimiter: "\t"
+
+  # File encoding — UTF-8 confirmed in data profiling
+  file_encoding: "utf-8"
+
+  # Strip Windows CRLF (\r\n) line endings — confirmed present in source file
+  strip_crlf: true
+
+  # Columns that MUST be present in the file for processing to proceed.
+  # If any of these are missing, the pipeline halts with a schema error.
+  required_columns:
+    - "hit_time_gmt"
+    - "date_time"
+    - "user_agent"
+    - "ip"
+    - "event_list"
+    - "geo_city"
+    - "geo_region"
+    - "geo_country"
+    - "pagename"
+    - "page_url"
+    - "product_list"
+    - "referrer"
+
+  # Expected data types for validation.
+  # Rows failing type coercion are logged and skipped (not silently corrupted).
+  column_dtypes:
+    hit_time_gmt: "int"
+    date_time: "datetime"
+    ip: "string"
+    referrer: "string"
+    event_list: "string"
+    product_list: "string"
+
+
+# -----------------------------------------------------------------------------
+# 3. PREPROCESSING / DATA QUALITY SETTINGS
+# Controls all validation checks before processing begins.
+# -----------------------------------------------------------------------------
+data_quality:
+
+  # Halt the entire pipeline if schema validation fails.
+  # Set to false ONLY in dev for exploratory runs.
+  fail_on_schema_error: true
+
+  # Halt the pipeline if any critical column contains null values.
+  fail_on_null_critical: true
+
+  # Columns that must NEVER be null. Pipeline halts if they are.
+  critical_columns:
+    - "hit_time_gmt"
+    - "ip"
+    - "referrer"
+
+  # Maximum allowed null percentage for non-critical columns before a WARNING
+  # is emitted (pipeline continues but alert is raised).
+  null_warning_threshold_pct: 50
+
+  # Columns used together as the composite key for duplicate detection.
+  # A row is considered a duplicate if all three values match a previous row.
+  duplicate_key_columns:
+    - "hit_time_gmt"
+    - "ip"
+    - "page_url"
+
+  # Write a detailed data quality report (JSON) per pipeline run to S3.
+  emit_quality_report: true
+
+  # Columns that contain PII and must never appear in logs, reports, or output.
+  # Values are SHA-256 hashed before any logging.
+  pii_columns:
+    - "ip"
+    - "user_agent"
+
+  # Hashing algorithm used for PII masking in logs
+  pii_hash_algorithm: "sha256"
+
+
+# -----------------------------------------------------------------------------
+# 4. PROCESSING ENGINE SETTINGS
+# Controls the routing between Pandas (small files) and PySpark (large files).
+# -----------------------------------------------------------------------------
+processing:
+
+  # File size threshold in MB.
+  # Files BELOW this value → Pandas engine (no cluster overhead).
+  # Files AT OR ABOVE this value → PySpark on EMR Serverless.
+  small_file_threshold_mb: 1024
+
+  # Engine identifiers — do not change unless adding a new engine
+  engine_small: "pandas"
+  engine_large: "pyspark"
+
+  # PySpark configuration (used when engine_large is selected)
+  spark:
+    app_name: "SearchKeywordPerformance"
+    executor_memory: "4g"
+    driver_memory: "2g"
+    num_partitions: 200          # spark.sql.shuffle.partitions
+    executor_cores: 4
+    dynamic_allocation: true     # Enable dynamic resource allocation on EMR
+    log_level: "WARN"            # Suppress verbose Spark INFO logs in output
+
+  # Pandas configuration (used when engine_small is selected)
+  pandas:
+    chunksize: 100000            # Rows per chunk for streaming large-ish files
+    low_memory: false            # Disable Pandas mixed-type inference warnings
+
+
+# -----------------------------------------------------------------------------
+# 5. OUTPUT SETTINGS
+# Controls the format and naming of the final delivered file.
+# -----------------------------------------------------------------------------
+output:
+
+  # Output file column delimiter (tab-delimited as per requirements)
+  file_delimiter: "\t"
+
+  # Output file encoding
+  file_encoding: "utf-8"
+
+  # Output filename pattern. {date} is replaced at runtime with execution date.
+  filename_pattern: "{date}_SearchKeywordPerformance.tab"
+
+  # Date format used in the output filename
+  date_format: "%Y-%m-%d"
+
+  # Output column headers — order defines column order in the file
+  columns:
+    - "Search Engine Domain"
+    - "Search Keyword"
+    - "Revenue"
+
+  # Column to sort the output by
+  sort_column: "Revenue"
+
+  # Sort order — false = descending (highest revenue first)
+  sort_ascending: false
+
+  # Number of decimal places for revenue values in the output
+  revenue_decimal_places: 2
+
+
+# -----------------------------------------------------------------------------
+# 6. AWS SETTINGS
+# Infrastructure references. Sensitive values use ${ENV_VAR} substitution.
+# -----------------------------------------------------------------------------
+aws:
+
+  # AWS region for all services
+  region: "us-east-1"
+
+  # S3 bucket names — {env} is replaced at runtime with dev/staging/prod
+  s3:
+    bucket_raw: "skp-raw-{env}"
+    bucket_processed: "skp-processed-{env}"
+    bucket_archive: "skp-archive-{env}"
+    bucket_logs: "skp-logs-{env}"
+
+    # S3 key prefixes within each bucket
+    prefix_raw: "raw/"
+    prefix_processed: "processed/"
+    prefix_archive: "archive/"
+    prefix_lineage: "lineage/"
+    prefix_dq_reports: "dq-reports/"
+
+  # AWS Lambda settings (small file path)
+  lambda:
+    timeout_seconds: 300
+    memory_mb: 512
+    runtime: "python3.12"
+
+  # EMR Serverless settings (large file path)
+  emr_serverless:
+    # Injected from environment variables at deploy time — never hardcoded
+    application_id: "${EMR_SERVERLESS_APP_ID}"
+    execution_role_arn: "${EMR_EXECUTION_ROLE_ARN}"
+    job_driver:
+      entry_point: "s3://{bucket}/scripts/search_keyword_spark.py"
+    initial_capacity:
+      driver:
+        worker_count: 1
+        worker_configuration:
+          cpu: "2vCPU"
+          memory: "4GB"
+      executor:
+        worker_count: 5
+        worker_configuration:
+          cpu: "4vCPU"
+          memory: "8GB"
+
+  # CloudWatch settings
+  cloudwatch:
+    log_group: "/skp/search-keyword-performance"
+    metric_namespace: "SKP/DataPipeline"
+    alarm_email: "${ALARM_EMAIL}"          # SNS notification target
+
+
+# -----------------------------------------------------------------------------
+# 7. DATA LINEAGE SETTINGS
+# Every pipeline run records its lineage for auditability.
+# -----------------------------------------------------------------------------
+lineage:
+
+  # Enable or disable lineage tracking
+  enabled: true
+
+  # Storage backend for lineage records
+  # Options: s3, local
+  store: "s3"
+
+  # Schema of the lineage record written per run
+  record_fields:
+    - "run_id"           # UUID generated per execution
+    - "execution_date"   # ISO 8601 timestamp
+    - "input_file"       # S3 URI of input file
+    - "input_row_count"  # Total rows in input
+    - "output_file"      # S3 URI of output file
+    - "output_row_count" # Rows in output
+    - "engine_used"      # pandas or pyspark
+    - "dq_passed"        # true/false
+    - "duration_seconds" # Wall clock time
+    - "git_commit"       # Git SHA for code version traceability
+
+
+# -----------------------------------------------------------------------------
+# 8. LOGGING SETTINGS
+# -----------------------------------------------------------------------------
+logging:
+
+  # Application log level
+  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+
+  # Log format string
+  format: "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+
+  # Date format in log messages
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+  # Emit structured JSON logs (true for CloudWatch ingestion)
+  structured: true
+
+
+# -----------------------------------------------------------------------------
+# 9. ENVIRONMENT SETTINGS
+# -----------------------------------------------------------------------------
+environment:
+
+  # Supported environments
+  supported:
+    - "dev"
+    - "staging"
+    - "prod"
+
+  # Default if APP_ENV is not set
+  default: "dev"
