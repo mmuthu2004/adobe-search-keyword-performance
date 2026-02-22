@@ -1,0 +1,27 @@
+# =============================================================================
+# requirements-spark.txt
+# Dependencies for the PySpark / EMR Serverless path
+# =============================================================================
+# These are NOT installed in the Lambda package.
+# Used when:
+#   1. Running spark_skp_pipeline.py locally with spark-submit
+#   2. Packaging dependencies for EMR Serverless jobs
+#   3. CI pipeline for parity test execution
+#
+# EMR 7.0.0 pre-installs: pyspark 3.5, boto3, hadoop-aws
+# We only need to ship: pyyaml (our config loader dependency)
+# =============================================================================
+
+# Config loader dependency (same as Lambda path)
+pyyaml>=6.0.1
+
+# AWS SDK — pre-installed on EMR but needed for local testing
+boto3>=1.34.0
+
+# PySpark — only for local development and parity tests
+# DO NOT include in EMR Serverless job package (pre-installed on cluster)
+pyspark==3.5.1
+
+# Testing
+pytest>=8.0.0
+pytest-timeout>=2.3.0
