@@ -1,17 +1,16 @@
 """
 writer.py
 =========
-Writes the final tab-delimited output file and uploads to S3.
-Filename format: YYYY-mm-dd_SearchKeywordPerformance.tab
+Pure Python output writer — zero dependencies.
+Writes tab-delimited output and uploads to S3.
 """
-
+import csv
 import io
 import logging
 import os
 from datetime import datetime
 
 import boto3
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -19,27 +18,30 @@ logger = logging.getLogger(__name__)
 class OutputWriter:
 
     def __init__(self, cfg):
-        self.delimiter     = cfg.get("output.file_delimiter",      default="\t")
-        self.encoding      = cfg.get("output.file_encoding",       default="utf-8")
-        self.filename_pat  = cfg.get("output.filename_pattern",    default="{date}_SearchKeywordPerformance.tab")
-        self.date_fmt      = cfg.get("output.date_format",         default="%Y-%m-%d")
-        self.revenue_dp    = cfg.get("output.revenue_decimal_places", default=2)
+        self.delimiter        = cfg.get("output.file_delimiter",          default="\t")
+        self.filename_pat     = cfg.get("output.filename_pattern",        default="{date}_SearchKeywordPerformance.tab")
+        self.date_fmt         = cfg.get("output.date_format",             default="%Y-%m-%d")
+        self.revenue_dp       = cfg.get("output.revenue_decimal_places",  default=2)
+        self.out_cols         = cfg.get("output.columns",
+                                        default=["Search Engine Domain","Search Keyword","Revenue"])
         self.processed_bucket = os.environ.get("PROCESSED_BUCKET", "")
 
-    def get_filename(self, execution_date: datetime = None) -> str:
-        """Generate output filename from pattern and execution date."""
+    def get_filename(self, execution_date=None) -> str:
         date_str = (execution_date or datetime.utcnow()).strftime(self.date_fmt)
         return self.filename_pat.replace("{date}", date_str)
 
-    def write_local(self, df: pd.DataFrame, local_path: str) -> str:
-        """Write results to a local tab-delimited file."""
-        # Format revenue column
-        revenue_col = df.columns[-1]
-        df = df.copy()
-        df[revenue_col] = df[revenue_col].apply(lambda x: f"{x:.{self.revenue_dp}f}")
+    def write_local(self, results: list, local_path: str) -> str:
+        """Write results list of dicts to a local tab-delimited file."""
+        with open(local_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.out_cols, delimiter=self.delimiter)
+            writer.writeheader()
+            for row in results:
+                # Format revenue to fixed decimal places
+                row_out = dict(row)
+                row_out[self.out_cols[2]] = f"{float(row[self.out_cols[2]]):.{self.revenue_dp}f}"
+                writer.writerow(row_out)
 
-        df.to_csv(local_path, sep=self.delimiter, index=False, encoding=self.encoding)
-        logger.info("Output written locally: %s (%d rows)", local_path, len(df))
+        logger.info("Output written locally: %s (%d rows)", local_path, len(results))
         return local_path
 
     def upload_to_s3(self, local_path: str, s3_key: str) -> str:
