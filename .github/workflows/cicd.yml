@@ -52,7 +52,7 @@ jobs:
       - name: Code quality check (flake8)
         run: |
           echo "Running flake8 code quality checks (v2)..."
-          flake8 src/ --max-line-length=120 --exclude=__pycache__ --ignore=E121,E122,E123,E124,E125,E126,E127,E128,E221,E226,E231,E241,E272,E301,E302,E402,F401 --statistics
+          flake8 src/ --max-line-length=120 --exclude=__pycache__ --ignore=E121,E122,E123,E124,E125,E126,E127,E128,E221,E226,E231,E241,E272,E301,E302,E402,F401,W503,W504 --statistics
         continue-on-error: false
 
       # Step 5: Run unit tests
