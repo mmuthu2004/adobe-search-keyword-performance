@@ -93,13 +93,10 @@ def handler(event, context=None):
             file_size_mb, threshold_mb
         )
         return _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts,
+                                s3_client=s3_client, bucket=bucket, key=key,
                                 reason="file_size_threshold")
 
     # ── Route Check 2: Lambda remaining time (context-aware) ──────────
-    # Even for small files, if Lambda is running low on time
-    # (e.g. cold start was slow, preprocessing took longer than expected)
-    # hand off to EMR rather than risk a mid-processing timeout.
-    # 60 seconds gives enough time for clean EMR submission + lineage write.
     if context and hasattr(context, "get_remaining_time_in_millis"):
         remaining_ms = context.get_remaining_time_in_millis()
         remaining_s  = remaining_ms / 1000
@@ -111,6 +108,7 @@ def handler(event, context=None):
                 remaining_s
             )
             return _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts,
+                                    s3_client=s3_client, bucket=bucket, key=key,
                                     reason="timeout_safety")
 
     # ── Pure Python path: download and process ────────────────────────
@@ -131,7 +129,6 @@ def handler(event, context=None):
         return _error_response(500, f"S3 download failed: {exc}")
 
     # ── Route Check 3: Post-download context check ────────────────────
-    # Check again after download — download itself consumes time.
     if context and hasattr(context, "get_remaining_time_in_millis"):
         remaining_ms = context.get_remaining_time_in_millis()
         if remaining_ms < 60_000:
@@ -140,6 +137,7 @@ def handler(event, context=None):
                 remaining_ms / 1000
             )
             return _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts,
+                                    s3_client=s3_client, bucket=bucket, key=key,
                                     reason="timeout_safety_post_download")
 
     # ── Preprocessing ─────────────────────────────────────────────────
@@ -159,8 +157,6 @@ def handler(event, context=None):
         return _error_response(500, f"Preprocessing failed: {exc}")
 
     # ── Route Check 4: Post-preprocessing context check ───────────────
-    # Preprocessing is the most memory-intensive step.
-    # Check again before analysis — if we are tight on time, hand off.
     if context and hasattr(context, "get_remaining_time_in_millis"):
         remaining_ms = context.get_remaining_time_in_millis()
         if remaining_ms < 60_000:
@@ -169,6 +165,7 @@ def handler(event, context=None):
                 remaining_ms / 1000
             )
             return _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts,
+                                    s3_client=s3_client, bucket=bucket, key=key,
                                     reason="timeout_safety_post_preprocessing")
 
     # ── Core analysis ─────────────────────────────────────────────────
@@ -242,11 +239,20 @@ def handler(event, context=None):
 
 # ── EMR handoff ───────────────────────────────────────────────────────
 
-def _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts, reason=""):
+def _handoff_to_emr(input_uri, run_id, cfg, lineage, start_ts,
+                    s3_client=None, bucket=None, key=None, reason=""):
     """
     Central EMR handoff function — called from any routing check.
-    Records lineage with the reason for handoff before submitting job.
+    Archives input file first (prevents reprocessing on re-upload),
+    then submits EMR job and records lineage.
     """
+    # ── Archive input before EMR submission ───────────────────────────
+    # Applies to ALL routes — Lambda and EMR both archive on success.
+    # Archive is done before EMR submission so the file is moved
+    # regardless of whether the EMR job itself succeeds.
+    if s3_client and bucket and key:
+        _archive_input(s3_client, bucket, key)
+
     result = _trigger_emr_job(input_uri, run_id, cfg)
     lineage.record(
         run_id=run_id, input_file=input_uri,
@@ -392,6 +398,10 @@ if __name__ == "__main__":
         def download_file(self, bucket, key, dest):
             shutil.copy(key, dest)
         def put_object(self, **kwargs):
+            pass
+        def copy_object(self, **kwargs):
+            pass
+        def delete_object(self, **kwargs):
             pass
 
     os.environ["PROCESSED_BUCKET"] = ""
