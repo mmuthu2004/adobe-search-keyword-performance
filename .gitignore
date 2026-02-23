@@ -1,0 +1,24 @@
+# Temp files
+*.zip
+archive_log.txt
+cloudwatch_logs.txt
+lambda_log.txt
+lambda_output.txt
+output.tab
+response.json
+emr-trust-policy.json
+lambda-s3-policy.json
+lambda-trust-policy.json
+lambda_package/
+layer/
+venv/
+src/config/__pycache__/
+src/preprocessing/__pycache__/
+src/processing/__pycache__/
+tests/data/hit_data_phase2_walk.tab
+tests/data/hit_data_phase3_jog.tab
+tests/data/hit_data_phase4_run.tab
+tests/data/lambda_output.tab
+tests/data/lambda_phase2_output.tab
+tests/data/output_phase3/
+tests/data/output_phase4/
