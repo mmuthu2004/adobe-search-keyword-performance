@@ -192,6 +192,11 @@ def handler(event, context=None):
     s3_output_key = f"processed/{filename}"
     s3_output_uri = writer.upload_to_s3(local_output, s3_output_key)
 
+    # ── Archive input file — prevents reprocessing on re-upload ──────
+    # Move processed file from raw/ to archive/ (separate prefix).
+    # S3 trigger only watches raw/ so archived files are never reprocessed.
+    _archive_input(s3_client, bucket, key)
+
     # ── Lineage ───────────────────────────────────────────────────────
     duration = time.time() - start_ts
     lineage.record(
@@ -330,6 +335,30 @@ def _trigger_emr_job(input_s3_uri: str, run_id: str, cfg) -> dict:
     except Exception as exc:
         logger.error("EMR submission failed: %s", exc)
         return _error_response(500, f"EMR submission failed: {exc}")
+
+
+# ── Archive helper ────────────────────────────────────────────────────
+
+def _archive_input(s3_client, bucket: str, key: str):
+    """
+    Move processed file from raw/ to archive/ after successful processing.
+    archive/ is outside the S3 trigger path — prevents reprocessing on re-upload.
+
+    raw/filename.tab     → archive/filename.tab
+    """
+    try:
+        filename    = key.split("/")[-1]
+        archive_key = f"archive/{filename}"
+        s3_client.copy_object(
+            Bucket=bucket,
+            CopySource={"Bucket": bucket, "Key": key},
+            Key=archive_key,
+        )
+        s3_client.delete_object(Bucket=bucket, Key=key)
+        logger.info("Archived: s3://%s/%s → s3://%s/%s", bucket, key, bucket, archive_key)
+    except Exception as exc:
+        # Archive failure is non-fatal — log warning but don't fail the pipeline
+        logger.warning("Archive failed (non-fatal): %s", exc)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
