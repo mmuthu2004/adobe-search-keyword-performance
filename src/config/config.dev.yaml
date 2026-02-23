@@ -6,7 +6,7 @@ aws:
     bucket_logs:      "skp-logs-dev-099622553872"
 
 processing:
-  small_file_threshold_mb: 100
+  small_file_threshold_mb: 20
 
 logging:
   level: DEBUG
