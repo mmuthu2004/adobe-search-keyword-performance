@@ -44,7 +44,7 @@ class TestEndToEnd(unittest.TestCase):
 
         raw      = DATA_FILE.read_text(encoding="utf-8", errors="replace")
         pipeline = PreprocessingPipeline(self.cfg)
-        rows, dq = pipeline.run(raw)
+        rows, error_rows, dq = pipeline.run(raw)
 
         analyzer = SearchKeywordAnalyzer(self.cfg)
         results  = analyzer.analyze(rows)
