@@ -834,11 +834,16 @@ def _get_phase_folder(key: str) -> str:
 
     # Filename keyword fallback (test/legacy files only).
     k = key.lower()
-    if   "phase1" in k or "crawl"  in k: return "phase1"
-    elif "phase2" in k or "walk"   in k: return "phase2"
-    elif "phase3" in k or "jog"    in k: return "phase3"
-    elif "phase4" in k or "run"    in k: return "phase4"
-    elif "phase5" in k or "sprint" in k: return "phase5"
+    if "phase1" in k or "crawl" in k:
+        return "phase1"
+    elif "phase2" in k or "walk" in k:
+        return "phase2"
+    elif "phase3" in k or "jog" in k:
+        return "phase3"
+    elif "phase4" in k or "run" in k:
+        return "phase4"
+    elif "phase5" in k or "sprint" in k:
+        return "phase5"
     return "other"
 
 
@@ -932,9 +937,14 @@ if __name__ == "__main__":
         def download_file(self, bucket, key, dest):
             shutil.copy(key, dest)
 
-        def put_object(self, **kwargs):    pass   # DQ errors / reports: no-op locally
-        def copy_object(self, **kwargs):   pass   # Archive / reject: no-op locally
-        def delete_object(self, **kwargs): pass   # Delete after copy: no-op locally
+        def put_object(self, **kwargs):     # DQ errors / reports: no-op locally
+            pass
+
+        def copy_object(self, **kwargs):    # Archive / reject: no-op locally
+            pass
+
+        def delete_object(self, **kwargs):  # Delete after copy: no-op locally
+            pass
 
     os.environ.setdefault("PROCESSED_BUCKET", "")
     os.environ.setdefault("LOGS_BUCKET",      "")
