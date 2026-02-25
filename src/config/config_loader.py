@@ -25,7 +25,6 @@ Usage:
     # Access with default
     level = cfg.get("logging.level", default="INFO")
 
-Author  : Principal Data Engineer, ACS Data Engineering
 Version : 1.0
 """
 

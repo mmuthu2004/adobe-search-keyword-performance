@@ -13,15 +13,11 @@
 # =============================================================================
 
 # Config loader dependency (same as Lambda path)
-pyyaml>=6.0.1
+pyyaml==6.0.3
 
-# AWS SDK — pre-installed on EMR but needed for local testing
-boto3>=1.34.0
+# AWS SDK — pre-installed on EMR 7.x but pinned for local development
+boto3==1.42.56
 
 # PySpark — only for local development and parity tests
 # DO NOT include in EMR Serverless job package (pre-installed on cluster)
 pyspark==3.5.1
-
-# Testing
-pytest>=8.0.0
-pytest-timeout>=2.3.0

@@ -1,5 +1,5 @@
-# boto3 is pre-installed in the AWS Lambda Python runtime
-# No additional dependencies needed for the Lambda path
-# pandas is only required for the EMR Serverless path (not Lambda)
-boto3>=1.34.0
-pyyaml>=6.0.1
+# Lambda runtime dependencies
+# boto3 is pre-installed in the AWS Lambda Python 3.12 runtime but pinned
+# here to ensure local development and CI/CD match the deployed version.
+boto3==1.42.56
+pyyaml==6.0.3
