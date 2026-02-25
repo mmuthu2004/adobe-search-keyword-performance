@@ -8,7 +8,7 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import boto3
 
@@ -27,7 +27,7 @@ class OutputWriter:
         self.processed_bucket = os.environ.get("PROCESSED_BUCKET", "")
 
     def get_filename(self, execution_date=None) -> str:
-        date_str = (execution_date or datetime.utcnow()).strftime(self.date_fmt)
+        date_str = (execution_date or datetime.now(timezone.utc)).strftime(self.date_fmt)
         return self.filename_pat.replace("{date}", date_str)
 
     def write_local(self, results: list, local_path: str) -> str:

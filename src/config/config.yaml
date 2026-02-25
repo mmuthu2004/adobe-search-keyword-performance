@@ -138,6 +138,12 @@ input:
 # -----------------------------------------------------------------------------
 data_quality:
 
+  # Source files must include a full timestamp in their filename in production.
+  # Required: hit_data_phase1_20260225_143000.tab  (_YYYYMMDD_HHMMSS)
+  # Full timestamp is feed-frequency agnostic — works for daily, hourly, or any
+  # cadence. Lambda rejects non-conforming files and moves them to rejected/.
+  enforce_filename_date: true
+
   # Halt the entire pipeline if schema validation fails.
   # Set to false ONLY in dev for exploratory runs.
   fail_on_schema_error: true
@@ -200,10 +206,8 @@ processing:
     dynamic_allocation: true     # Enable dynamic resource allocation on EMR
     log_level: "WARN"            # Suppress verbose Spark INFO logs in output
 
-  # Pandas configuration (used when engine_small is selected)
-  pandas:
-    chunksize: 100000            # Rows per chunk for streaming large-ish files
-    low_memory: false            # Disable Pandas mixed-type inference warnings
+  # Note: pure Python (Lambda) path does not use Pandas.
+  # Pandas settings are reserved for future batch-mode tooling.
 
 
 # -----------------------------------------------------------------------------
@@ -266,7 +270,7 @@ aws:
   # AWS Lambda settings (small file path)
   lambda:
     timeout_seconds: 300
-    memory_mb: 512
+    memory_mb: 3008
     runtime: "python3.12"
 
   # EMR Serverless settings (large file path)

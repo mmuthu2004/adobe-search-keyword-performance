@@ -45,7 +45,7 @@ def _run_python_pipeline(filepath):
 
     cfg = load_config(env="dev")
     raw = filepath.read_text(encoding="utf-8", errors="replace")
-    rows, dq = PreprocessingPipeline(cfg).run(raw)
+    rows, error_rows, dq = PreprocessingPipeline(cfg).run(raw)
     results = SearchKeywordAnalyzer(cfg).analyze(rows)
 
     return [
@@ -239,7 +239,7 @@ class TestSparkDQChecks(unittest.TestCase):
         from preprocessing.preprocessing_pipeline import PreprocessingPipeline
         cfg = load_config(env="dev")
         raw = filepath.read_text(encoding="utf-8", errors="replace")
-        _, dq = PreprocessingPipeline(cfg).run(raw)
+        _, _error_rows, dq = PreprocessingPipeline(cfg).run(raw)
         python_clean_rows = dq["rows_out"]
 
         # Spark count

@@ -1,11 +1,6 @@
-notepad .flake8
-```
-
-Click **Yes** to create. Paste this:
-```
 [flake8]
 max-line-length = 120
-exclude = 
+exclude =
     __pycache__,
     venv,
     lambda_package,
@@ -13,6 +8,7 @@ exclude =
 ignore =
     E221,
     E231,
+    E241,
     E272,
     E301,
     E302,

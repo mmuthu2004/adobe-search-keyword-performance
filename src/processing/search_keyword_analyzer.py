@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 
 
 class SearchKeywordAnalyzer:
+    """
+    Core business logic engine — pure Python, zero external dependencies.
+
+    Implements session-based first-touch attribution:
+      Pass 1 — Build session map: for each IP, record the FIRST search engine
+               referrer seen (domain + keyword). O(n) scan in chronological order.
+      Pass 2 — Attribute revenue: for each purchase row, look up the IP's session.
+               Only purchases from IPs with a prior search engine visit are counted.
+      Aggregate — group by (domain, keyword), sum revenue, sort descending.
+
+    All business rules (domains, keyword params, revenue parsing, attribution model)
+    are config-driven — see config.yaml business_rules section.
+    """
 
     def __init__(self, cfg):
         self.search_domains  = cfg.require("business_rules.search_engine_domains")
@@ -147,7 +160,9 @@ class SearchKeywordAnalyzer:
                 "keyword": session["keyword"],
                 "revenue": revenue,
             })
-            logger.info(
+            # DEBUG — not INFO: this fires once per purchase row and would flood
+            # CloudWatch logs for files with thousands of purchase events.
+            logger.debug(
                 "Attribution: %s / %s  →  $%.2f",
                 session["domain"], session["keyword"], revenue
             )
