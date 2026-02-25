@@ -2,7 +2,8 @@
 spark_skp_pipeline.py
 =====================
 PySpark implementation of the Search Keyword Performance pipeline.
-Runs on AWS EMR Serverless for files >= 100MB.
+Runs on AWS EMR Serverless for files >= threshold_mb
+(50 MB in dev / 1024 MB in prod — config-driven via processing.small_file_threshold_mb).
 
 Mirrors the exact business logic of the pure Python Lambda path.
 Output must be byte-identical to the Lambda path for the same input.
@@ -35,6 +36,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 # ── PySpark imports ───────────────────────────────────────────────────
 from pyspark.sql import SparkSession, Window
@@ -52,7 +54,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("spark_skp_pipeline")
 
-# ── Constants (all business rules come from config or args) ───────────
+# ── Default constants (used when no config-json is passed, e.g. in tests) ──
 REQUIRED_COLUMNS = [
     "hit_time_gmt", "date_time", "user_agent", "ip",
     "event_list", "geo_city", "geo_region", "geo_country",
@@ -65,6 +67,35 @@ KEYWORD_PARAMS = ["q", "p", "query", "text", "s", "qs"]
 PURCHASE_EVENT_ID = "1"
 REVENUE_COL_INDEX = 3
 OUTPUT_COLUMNS = ["Search Engine Domain", "Search Keyword", "Revenue"]
+
+
+def load_pipeline_config(config_json_str=None):
+    """
+    Build a config dict for the Spark pipeline.
+    When config_json_str is supplied (from Lambda via --config-json), its values
+    override the module-level defaults so Spark always mirrors config.yaml.
+    When called without args (e.g. from tests), the defaults above are used.
+    """
+    cfg = {
+        "required_columns":           REQUIRED_COLUMNS,
+        "critical_columns":           CRITICAL_COLUMNS,
+        "dedup_key_columns":          DEDUP_KEY_COLUMNS,
+        "search_engine_domains":      SEARCH_ENGINE_DOMAINS,
+        "keyword_params":             KEYWORD_PARAMS,
+        "purchase_event_id":          PURCHASE_EVENT_ID,
+        "revenue_col_index":          REVENUE_COL_INDEX,
+        "output_columns":             OUTPUT_COLUMNS,
+        "product_delimiter":          ",",
+        "product_attr_delimiter":     ";",
+        "event_delimiter":            ",",
+        "keyword_normalize_case":     True,
+        "min_revenue_threshold":      0.0,
+        "null_warning_threshold_pct": 50,
+    }
+    if config_json_str:
+        overrides = json.loads(config_json_str)
+        cfg.update(overrides)
+    return cfg
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -143,18 +174,19 @@ def read_input(spark, input_path):
 # STEP 2 — SCHEMA VALIDATION
 # ══════════════════════════════════════════════════════════════════════
 
-def validate_schema(df):
+def validate_schema(df, cfg=None):
     """
     Check all required columns are present.
     Raises ValueError immediately if any are missing — fail fast.
     """
+    required = (cfg or {}).get("required_columns", REQUIRED_COLUMNS)
     actual_cols = set(df.columns)
-    missing = sorted(set(REQUIRED_COLUMNS) - actual_cols)
+    missing = sorted(set(required) - actual_cols)
 
     if missing:
         raise ValueError(f"Schema validation FAILED. Missing columns: {missing}")
 
-    logger.info("Schema validation PASSED. All %d required columns present.", len(REQUIRED_COLUMNS))
+    logger.info("Schema validation PASSED. All %d required columns present.", len(required))
     return {"check": "schema_validation", "passed": True, "missing": []}
 
 
@@ -162,7 +194,7 @@ def validate_schema(df):
 # STEP 3 — NULL VALIDATION
 # ══════════════════════════════════════════════════════════════════════
 
-def validate_nulls(df, total_rows):
+def validate_nulls(df, total_rows, cfg=None):
     """
     Check critical columns have no nulls.
     Non-critical columns emit warnings if null rate exceeds threshold.
@@ -171,9 +203,12 @@ def validate_nulls(df, total_rows):
     Spark treats empty string ("") differently from null.
     We check BOTH to match the pure Python behavior.
     """
-    failures = []
+    critical  = (cfg or {}).get("critical_columns",           CRITICAL_COLUMNS)
+    required  = (cfg or {}).get("required_columns",           REQUIRED_COLUMNS)
+    warn_pct  = (cfg or {}).get("null_warning_threshold_pct", 50)
+    failures  = []
 
-    for col_name in CRITICAL_COLUMNS:
+    for col_name in critical:
         null_count = df.filter(
             F.col(col_name).isNull() | (F.trim(F.col(col_name)) == "")
         ).count()
@@ -189,14 +224,15 @@ def validate_nulls(df, total_rows):
         raise ValueError(f"Null validation FAILED. Critical columns with nulls: {failures}")
 
     # Warn on non-critical columns with high null rates
-    for col_name in REQUIRED_COLUMNS:
-        if col_name in CRITICAL_COLUMNS:
+    critical_set = set(critical)
+    for col_name in required:
+        if col_name in critical_set:
             continue
         null_count = df.filter(
             F.col(col_name).isNull() | (F.trim(F.col(col_name)) == "")
         ).count()
         null_pct = round(null_count / total_rows * 100, 2) if total_rows > 0 else 0
-        if null_pct > 50:
+        if null_pct > warn_pct:
             logger.warning("Column '%s' has high null rate: %.2f%%", col_name, null_pct)
 
     logger.info("Null validation PASSED. No critical column nulls.")
@@ -207,12 +243,13 @@ def validate_nulls(df, total_rows):
 # STEP 4 — DEDUPLICATION
 # ══════════════════════════════════════════════════════════════════════
 
-def deduplicate(df, total_rows):
+def deduplicate(df, total_rows, cfg=None):
     """
     Remove duplicate rows based on composite key (hit_time_gmt, ip, page_url).
     Uses Spark's built-in dropDuplicates — optimized internally.
     """
-    df_deduped = df.dropDuplicates(DEDUP_KEY_COLUMNS)
+    dedup_keys = (cfg or {}).get("dedup_key_columns", DEDUP_KEY_COLUMNS)
+    df_deduped = df.dropDuplicates(dedup_keys)
     deduped_count = df_deduped.count()
     dupes = total_rows - deduped_count
 
@@ -234,7 +271,7 @@ def deduplicate(df, total_rows):
 # STEP 5 — BUILD SESSION MAP (FIRST-TOUCH ATTRIBUTION)
 # ══════════════════════════════════════════════════════════════════════
 
-def build_session_map(df):
+def build_session_map(df, cfg=None):
     """
     Extract the FIRST search engine referrer per IP address.
 
@@ -261,10 +298,11 @@ def build_session_map(df):
     # exactly — same urllib.parse logic, same normalization, same param order.
     # UDF approach avoids PySpark version differences with parse_url().
 
-    from urllib.parse import urlparse, parse_qs
-
-    _domain_set_local   = set(SEARCH_ENGINE_DOMAINS)
-    _keyword_params_local = KEYWORD_PARAMS
+    # Capture config values into local vars so the UDF closure picks them up
+    # (urlparse / parse_qs imported at module level)
+    _domain_set_local     = set((cfg or {}).get("search_engine_domains", SEARCH_ENGINE_DOMAINS))
+    _keyword_params_local = (cfg or {}).get("keyword_params", KEYWORD_PARAMS)
+    _normalize_case       = (cfg or {}).get("keyword_normalize_case", True)
 
     @F.udf(returnType=StructType([
         StructField("domain",  StringType(), True),
@@ -289,7 +327,8 @@ def build_session_map(df):
             keyword = None
             for param in _keyword_params_local:
                 if param in query_params and query_params[param][0]:
-                    keyword = query_params[param][0].lower().strip()
+                    kw = query_params[param][0].strip()
+                    keyword = kw.lower() if _normalize_case else kw
                     break
             if keyword is None:
                 return (None, None)
@@ -337,7 +376,7 @@ def build_session_map(df):
 # STEP 6 — EXTRACT PURCHASE REVENUE
 # ══════════════════════════════════════════════════════════════════════
 
-def extract_purchase_rows(df):
+def extract_purchase_rows(df, cfg=None):
     """
     Filter to purchase rows and extract revenue from product_list.
 
@@ -353,12 +392,19 @@ def extract_purchase_rows(df):
     """
     logger.info("Extracting purchase rows...")
 
+    # Capture config values into local vars for UDF closures
+    _purchase_event_id = (cfg or {}).get("purchase_event_id",     PURCHASE_EVENT_ID)
+    _revenue_col_index = (cfg or {}).get("revenue_col_index",     REVENUE_COL_INDEX)
+    _prod_delim        = (cfg or {}).get("product_delimiter",     ",")
+    _prod_attr_delim   = (cfg or {}).get("product_attr_delimiter", ";")
+    _min_revenue       = (cfg or {}).get("min_revenue_threshold",  0.0)
+
     # ── Filter to rows with purchase event ───────────────────────────
-    # event_list can be "1", "1,2", "2,1,3" — we check if '1' is in the list
+    # event_list can be "1", "1,2", "2,1,3" — we check if the event id is present
     df_purchases = df.filter(
         F.array_contains(
             F.split(F.col("event_list"), ","),
-            F.lit(PURCHASE_EVENT_ID)
+            F.lit(_purchase_event_id)
         )
     ).filter(
         F.col("product_list").isNotNull()
@@ -378,11 +424,11 @@ def extract_purchase_rows(df):
         if not product_list_str or product_list_str.strip() in ("", "nan", "None"):
             return 0.0
         total = 0.0
-        for product in product_list_str.split(","):
-            attrs = product.split(";")
-            if len(attrs) > REVENUE_COL_INDEX:
+        for product in product_list_str.split(_prod_delim):
+            attrs = product.split(_prod_attr_delim)
+            if len(attrs) > _revenue_col_index:
                 try:
-                    val = attrs[REVENUE_COL_INDEX].strip()
+                    val = attrs[_revenue_col_index].strip()
                     if val:
                         total += float(val)
                 except (ValueError, TypeError):
@@ -392,7 +438,7 @@ def extract_purchase_rows(df):
     df_purchases = (
         df_purchases
         .withColumn("revenue", parse_revenue(F.col("product_list")))
-        .filter(F.col("revenue") > 0.0)
+        .filter(F.col("revenue") > _min_revenue)
         .select("ip", "hit_time_gmt", "revenue")
     )
 
@@ -433,7 +479,7 @@ def attribute_revenue(df_purchases, df_session_map):
 # STEP 8 — AGGREGATE
 # ══════════════════════════════════════════════════════════════════════
 
-def aggregate_results(df_attributed):
+def aggregate_results(df_attributed, cfg=None):
     """
     Group by (search_domain, search_keyword), sum revenue.
     Sort by revenue descending.
@@ -443,27 +489,30 @@ def aggregate_results(df_attributed):
     """
     logger.info("Aggregating results...")
 
+    out_cols    = (cfg or {}).get("output_columns",          OUTPUT_COLUMNS)
+    min_revenue = (cfg or {}).get("min_revenue_threshold",   0.0)
+
     df_results = (
         df_attributed
         .groupBy("search_domain", "search_keyword")
         .agg(F.round(F.sum("revenue"), 2).alias("Revenue"))
-        .filter(F.col("Revenue") > 0.0)
-        .withColumnRenamed("search_domain",  "Search Engine Domain")
-        .withColumnRenamed("search_keyword", "Search Keyword")
-        .orderBy(F.col("Revenue").desc())
+        .filter(F.col("Revenue") > min_revenue)
+        .withColumnRenamed("search_domain",  out_cols[0])
+        .withColumnRenamed("search_keyword", out_cols[1])
+        .withColumnRenamed("Revenue",        out_cols[2])
+        .orderBy(F.col(out_cols[2]).desc())
     )
 
-    result_count = df_results.count()
-    total_revenue = df_results.agg(F.sum("Revenue")).collect()[0][0] or 0.0
+    result_count  = df_results.count()
+    rev_col       = out_cols[2]
+    total_revenue = df_results.agg(F.sum(rev_col)).collect()[0][0] or 0.0
 
     logger.info("=" * 60)
     logger.info("RESULTS — Search Keyword Performance")
     logger.info("=" * 60)
     for row in df_results.collect():
         logger.info("%-25s %-20s $%10.2f",
-                    row["Search Engine Domain"],
-                    row["Search Keyword"],
-                    row["Revenue"])
+                    row[out_cols[0]], row[out_cols[1]], row[rev_col])
     logger.info("=" * 60)
     logger.info("Output rows: %d | Total revenue: $%.2f", result_count, total_revenue)
 
@@ -517,18 +566,110 @@ def write_output(df_results, output_path, exec_date=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# S3 HELPERS (archive + DQ report)
+# ══════════════════════════════════════════════════════════════════════
+
+def _archive_input_s3(input_path):
+    """
+    Copy input file to archive/ prefix and delete the original.
+    Only called on successful pipeline completion — never on failure.
+
+    Preserves the phase sub-folder from the input key so the archive mirrors
+    the raw/ layout:
+      raw/phase3/hit_data_phase3_20260225_143000.tab
+      →  archive/phase3/hit_data_phase3_20260225_143000.tab
+
+    This makes the archive queryable by phase and matches the Lambda path behaviour.
+    """
+    if not input_path or not input_path.startswith("s3://"):
+        logger.info("Skipping archive — input is not an S3 URI: %s", input_path)
+        return
+    try:
+        import boto3
+        s3_part        = input_path[len("s3://"):]
+        bucket, key    = s3_part.split("/", 1)
+
+        # Reconstruct archive key by replacing the leading "raw/" segment with "archive/".
+        # Input key format:  raw/{phase}/{filename}   (3+ path segments)
+        # Archive key format: archive/{phase}/{filename}
+        # If the key doesn't start with "raw/", fall back to a flat archive/ prefix.
+        parts       = key.split("/")
+        if parts[0] == "raw" and len(parts) >= 2:
+            archive_key = "archive/" + "/".join(parts[1:])   # raw/phase3/f.tab → archive/phase3/f.tab
+        else:
+            archive_key = f"archive/{parts[-1]}"             # unexpected layout — best-effort
+
+        s3 = boto3.client("s3")
+        s3.copy_object(
+            Bucket=bucket,
+            CopySource={"Bucket": bucket, "Key": key},
+            Key=archive_key,
+        )
+        s3.delete_object(Bucket=bucket, Key=key)
+        logger.info("Input archived: s3://%s/%s → s3://%s/%s",
+                    bucket, key, bucket, archive_key)
+    except Exception as exc:
+        logger.warning("Archive failed (non-fatal): %s", exc)
+
+
+def _write_dq_report_s3(run_id, dq_checks, input_path):
+    """
+    Write DQ check results as JSON to dq-reports/ in the raw (input) bucket.
+    Mirrors what lambda_handler._write_dq_report() does on the Lambda path.
+    """
+    if not input_path or not input_path.startswith("s3://"):
+        return
+    try:
+        import boto3
+        s3_part = input_path[len("s3://"):]
+        bucket  = s3_part.split("/")[0]
+        orig    = s3_part.split("/")[-1].rsplit(".", 1)[0]
+        now     = datetime.now(timezone.utc)
+        key     = (
+            f"dq-reports/{now.year}/{now.month:02d}/{now.day:02d}/"
+            f"{orig}_{run_id[:8]}_dq_report.json"
+        )
+        report = {
+            "run_id":          run_id,
+            "execution_date":  now.isoformat(),
+            "input_file":      input_path,
+            "dq_checks":       dq_checks,
+            "overall_passed":  all(c.get("passed", True) for c in dq_checks),
+            "engine":          "pyspark",
+        }
+        boto3.client("s3").put_object(
+            Bucket=bucket, Key=key,
+            Body=json.dumps(report, default=str).encode("utf-8"),
+            ContentType="application/json",
+        )
+        logger.info("DQ report written: s3://%s/%s", bucket, key)
+    except Exception as exc:
+        logger.warning("DQ report write failed (non-fatal): %s", exc)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # MAIN PIPELINE ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════════════
 
-def run_pipeline(input_path, output_path, env="dev", local=False):
+def run_pipeline(input_path, output_path, env="dev", local=False,
+                 config_json=None, archive_input=None):
     """
     Orchestrate the full pipeline. Called by both the CLI entry point
     and by the EMR Serverless job runner.
 
+    Args:
+        input_path:   S3 URI or local path to the input tab file.
+        output_path:  S3 URI or local path for the output directory.
+        env:          Environment name (dev/staging/prod).
+        local:        True to run Spark in local mode.
+        config_json:  JSON string of config overrides from Lambda (business rules).
+        archive_input: S3 URI to archive on success (same as input_path when set).
+
     Returns a dict with run summary for lineage recording.
     """
-    run_id = str(uuid.uuid4())
+    run_id   = str(uuid.uuid4())
     start_ts = time.time()
+    cfg      = load_pipeline_config(config_json)
 
     logger.info("=" * 60)
     logger.info("SKP PySpark Pipeline Start | run_id=%s", run_id)
@@ -546,48 +687,55 @@ def run_pipeline(input_path, output_path, env="dev", local=False):
         df, total_rows = read_input(spark, input_path)
 
         # ── Step 2: Schema validation ─────────────────────────────────
-        schema_result = validate_schema(df)
+        schema_result = validate_schema(df, cfg)
         dq_checks.append(schema_result)
 
         # ── Step 3: Null validation ───────────────────────────────────
-        null_result = validate_nulls(df, total_rows)
+        null_result = validate_nulls(df, total_rows, cfg)
         dq_checks.append(null_result)
 
         # ── Step 4: Deduplication ─────────────────────────────────────
-        df_clean, dedup_result = deduplicate(df, total_rows)
+        df_clean, dedup_result = deduplicate(df, total_rows, cfg)
         dq_checks.append(dedup_result)
         clean_rows = dedup_result["rows_after"]
 
         # ── Step 5: Build session map ─────────────────────────────────
-        df_session_map = build_session_map(df_clean)
+        df_session_map = build_session_map(df_clean, cfg)
 
         # ── Step 6: Extract purchases ─────────────────────────────────
-        df_purchases = extract_purchase_rows(df_clean)
+        df_purchases = extract_purchase_rows(df_clean, cfg)
 
         # ── Step 7: Attribute revenue ─────────────────────────────────
         df_attributed = attribute_revenue(df_purchases, df_session_map)
 
         # ── Step 8: Aggregate ─────────────────────────────────────────
-        df_results = aggregate_results(df_attributed)
+        df_results = aggregate_results(df_attributed, cfg)
         output_rows = df_results.count()
 
         # ── Step 9: Write output ──────────────────────────────────────
         output_location, filename = write_output(df_results, output_path)
 
-        duration = time.time() - start_ts
+        duration  = time.time() - start_ts
         dq_passed = all(c.get("passed", True) for c in dq_checks)
 
+        # ── Step 10: Archive input (only on success) ──────────────────
+        if archive_input:
+            _archive_input_s3(archive_input)
+
+        # ── Step 11: Write DQ report ──────────────────────────────────
+        _write_dq_report_s3(run_id, dq_checks, input_path)
+
         summary = {
-            "run_id":          run_id,
-            "status":          "SUCCESS",
-            "input_file":      input_path,
-            "output_file":     output_location,
-            "input_rows":      total_rows,
-            "clean_rows":      clean_rows,
-            "output_rows":     output_rows,
-            "dq_passed":       dq_passed,
-            "duration_s":      round(duration, 2),
-            "engine":          "pyspark",
+            "run_id":      run_id,
+            "status":      "SUCCESS",
+            "input_file":  input_path,
+            "output_file": output_location,
+            "input_rows":  total_rows,
+            "clean_rows":  clean_rows,
+            "output_rows": output_rows,
+            "dq_passed":   dq_passed,
+            "duration_s":  round(duration, 2),
+            "engine":      "pyspark",
         }
 
         logger.info("=" * 60)
@@ -603,6 +751,7 @@ def run_pipeline(input_path, output_path, env="dev", local=False):
     except Exception as exc:
         duration = time.time() - start_ts
         logger.error("Pipeline FAILED after %.2fs: %s", duration, exc, exc_info=True)
+        # Do NOT archive on failure — keep input file recoverable
         return {
             "run_id":     run_id,
             "status":     "FAILED",
@@ -639,6 +788,14 @@ def parse_args():
         "--local",  action="store_true",
         help="Run in local Spark mode (for testing without EMR)"
     )
+    parser.add_argument(
+        "--config-json", default=None,
+        help="JSON string of business rule overrides from Lambda config.yaml"
+    )
+    parser.add_argument(
+        "--archive-input", default=None,
+        help="S3 URI to archive (copy+delete) on successful completion"
+    )
     return parser.parse_args()
 
 
@@ -649,6 +806,8 @@ if __name__ == "__main__":
         output_path=args.output,
         env=args.env,
         local=args.local,
+        config_json=args.config_json,
+        archive_input=args.archive_input,
     )
     print(json.dumps(result, indent=2))
     sys.exit(0 if result["status"] == "SUCCESS" else 1)

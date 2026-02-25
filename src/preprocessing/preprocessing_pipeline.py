@@ -32,6 +32,23 @@ class NullValidationError(Exception):
 
 
 class PreprocessingPipeline:
+    """
+    Orchestrates all preprocessing and data quality checks on raw hit-level data.
+
+    Four sequential checks:
+      1. Schema validation  — all required columns present (fatal if missing)
+      2. CRLF normalisation — Windows line endings silently fixed before parsing
+      3. Null validation    — critical columns must not be empty (fatal if configured)
+      4. Duplicate removal  — composite-key dedup (always non-fatal; dupes become error rows)
+
+    Returns a 3-tuple: (clean_rows, error_rows, dq_report)
+      clean_rows  — list of dicts ready for SearchKeywordAnalyzer
+      error_rows  — list of dicts that failed checks, each tagged with '_error_reason'
+      dq_report   — dict with per-check results, row counts, and overall pass/fail
+
+    Zero external dependencies — standard library only (csv, io, logging).
+    Designed for the Lambda pure-Python execution path.
+    """
 
     def __init__(self, cfg):
         self.delimiter      = cfg.get("input.file_delimiter",              default="\t")
@@ -40,7 +57,10 @@ class PreprocessingPipeline:
         self.critical_cols  = cfg.require("data_quality.critical_columns")
         self.dedup_keys     = cfg.require("data_quality.duplicate_key_columns")
         self.fail_schema    = cfg.get("data_quality.fail_on_schema_error",  default=True)
-        self.fail_null      = cfg.get("data_quality.fail_on_null_critical", default=False)  # Continue by default
+        # When True: raise NullValidationError if any critical column row is empty.
+        # When False: collect null rows as error_rows and continue processing.
+        # Prod default: True (config.yaml). Dev default: inherits True unless overridden.
+        self.fail_null      = cfg.get("data_quality.fail_on_null_critical", default=True)
         self.warn_threshold = cfg.get("data_quality.null_warning_threshold_pct", default=50)
 
     def run(self, raw_content: str) -> tuple:
@@ -121,6 +141,15 @@ class PreprocessingPipeline:
                 "Null validation: %d row(s) rejected for null in critical columns.",
                 len(null_error_rows)
             )
+            # Halt pipeline if configured to fail hard on null critical columns.
+            # Lambda catches this as a 500 and logs it — input file stays in raw/
+            # so it can be investigated and reprocessed after the data issue is fixed.
+            if self.fail_null:
+                raise NullValidationError(
+                    f"Null validation FAILED. {len(null_error_rows)} row(s) have null "
+                    f"in critical columns {self.critical_cols}. "
+                    f"Set fail_on_null_critical: false in config to continue instead."
+                )
         else:
             logger.info("Null validation PASSED. No critical column nulls.")
 
