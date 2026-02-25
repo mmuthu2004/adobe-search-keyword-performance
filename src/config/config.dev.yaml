@@ -1,8 +1,21 @@
-# config.dev.yaml — Dev environment overrides
+# =============================================================================
+# Environment Override — DEVELOPMENT
+# =============================================================================
+# Local and CI development overrides for config.yaml (base).
+# Lower thresholds, relaxed naming enforcement, and local lineage storage
+# make iterative development and testing faster without affecting prod behaviour.
+#
+# Merge strategy: base config.yaml is deep-merged with this file.
+# Naming convention: skp-{purpose}-{env}-{account_id}
+# =============================================================================
+
 aws:
   s3:
+    # All four bucket keys overridden so the full config is consistent.
+    # bucket_archive is a prefix within raw bucket — included here for completeness.
     bucket_raw:       "skp-raw-dev-099622553872"
     bucket_processed: "skp-processed-dev-099622553872"
+    bucket_archive:   "skp-archive-dev-099622553872"
     bucket_logs:      "skp-logs-dev-099622553872"
 
 processing:
