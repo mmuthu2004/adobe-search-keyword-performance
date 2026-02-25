@@ -8,6 +8,7 @@ exclude =
 ignore =
     E221,
     E231,
+    E241,
     E272,
     E301,
     E302,
