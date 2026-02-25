@@ -14,7 +14,7 @@ on:
       - develop
 
 env:
-  PYTHON_VERSION: "3.13"
+  PYTHON_VERSION: "3.12"
   AWS_REGION: "us-east-1"
   LAMBDA_FUNCTION_NAME: "skp-search-keyword-performance"
   S3_RAW_BUCKET: "skp-raw-dev-099622553872"
@@ -85,7 +85,7 @@ jobs:
             --platform manylinux2014_x86_64 \
             --target lambda_package/ \
             --implementation cp \
-            --python-version 3.13 \
+            --python-version 3.12 \
             --only-binary=:all: \
             --upgrade
           cd lambda_package
@@ -202,7 +202,11 @@ jobs:
         run: |
           echo "Verifying output file in S3..."
           TODAY=$(date +%Y-%m-%d)
-          OUTPUT_KEY="processed/${TODAY}_SearchKeywordPerformance.tab"
+          YEAR=$(date +%Y)
+          MONTH=$(date +%m)
+          DAY=$(date +%d)
+          # Hive-style phase-first path: hit_data.tab has no phase tag → "other"
+          OUTPUT_KEY="processed/other/year=${YEAR}/month=${MONTH}/day=${DAY}/${TODAY}_SearchKeywordPerformance.tab"
 
           aws s3 cp s3://${{ env.S3_PROCESSED_BUCKET }}/${OUTPUT_KEY} result.tab
 
