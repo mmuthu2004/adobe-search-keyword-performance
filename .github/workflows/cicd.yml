@@ -164,6 +164,9 @@ jobs:
         run: |
           echo "Running smoke test..."
 
+          # Remove any previous archive entry so duplicate-check doesn't reject this run
+          aws s3 rm s3://${{ env.S3_RAW_BUCKET }}/archive/other/hit_data.tab --quiet || true
+
           # Upload sample file to S3
           aws s3 cp tests/data/hit_data.tab s3://${{ env.S3_RAW_BUCKET }}/raw/hit_data.tab
 
