@@ -13,7 +13,6 @@
 # Sensitive values (ARNs, IDs) are injected via environment variables
 # using the ${VAR_NAME} syntax — never stored in this file.
 #
-# Author  : Principal Data Engineer, ACS Data Engineering
 # Version : 1.0
 # =============================================================================
 

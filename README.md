@@ -976,5 +976,4 @@ Electronics;iPod;1;290.00;event1;evar1,Accessories;Cable;2;15.00
 
 ---
 
-*Maintained by ACS Data Engineering · Principal Data Engineer*
-*Pipeline version: 1.0 · Last updated: 2026-02-25*
+*Adobe Analytics — Search Keyword Performance Pipeline · v1.0*
