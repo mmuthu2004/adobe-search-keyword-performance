@@ -1,0 +1,10 @@
+# Development and testing dependencies
+# Install with: pip install -r requirements-dev.txt
+# NOT included in Lambda or EMR Serverless packages.
+
+# Test runner
+pytest==9.0.2
+pytest-timeout==2.4.0
+
+# Spark parity tests (requires a local Java 11+ installation)
+-r requirements-spark.txt

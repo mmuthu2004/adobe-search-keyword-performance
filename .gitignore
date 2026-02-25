@@ -1,3 +1,6 @@
+# Dev/test artifacts
+invoke-payload.json
+
 # Temp files
 *.zip
 archive_log.txt
