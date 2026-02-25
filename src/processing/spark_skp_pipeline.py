@@ -547,9 +547,11 @@ def write_output(df_results, output_path, exec_date=None):
         F.format_number(F.col("Revenue"), 2)
     )
 
-    # Use coalesce(1) so output is a single file, not 200 part files
-    # For very large outputs (>1GB), remove coalesce and handle part files
+    # Use coalesce(1) so output is a single part file, not 200.
+    # Spark always writes a directory; we rename the single part file
+    # to the final filename and delete the _tmp staging directory.
     output_dir = f"{output_path.rstrip('/')}/{filename}_tmp"
+    final_key_path = f"{output_path.rstrip('/')}/{filename}"
 
     (
         df_output
@@ -561,8 +563,41 @@ def write_output(df_results, output_path, exec_date=None):
         .csv(output_dir)
     )
 
-    logger.info("Output written to: %s", output_dir)
-    return output_dir, filename
+    # Rename: copy the single part file to the clean filename, then
+    # delete the entire _tmp staging directory (part file + _SUCCESS).
+    if output_dir.startswith("s3://"):
+        import boto3
+
+        parsed   = urlparse(output_dir)
+        bucket   = parsed.netloc
+        prefix   = parsed.path.lstrip("/")
+        s3       = boto3.client("s3")
+
+        # Find the part file (there is exactly one due to coalesce(1)).
+        objects  = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        part_key = next(
+            o["Key"] for o in objects.get("Contents", [])
+            if "/part-" in o["Key"] and o["Key"].endswith(".csv")
+        )
+
+        # Copy part file → final clean filename.
+        final_parsed = urlparse(final_key_path)
+        final_key    = final_parsed.path.lstrip("/")
+        s3.copy_object(
+            Bucket=bucket, CopySource={"Bucket": bucket, "Key": part_key},
+            Key=final_key,
+        )
+        logger.info("Output renamed: s3://%s/%s → s3://%s/%s",
+                    bucket, part_key, bucket, final_key)
+
+        # Clean up _tmp staging directory.
+        for obj in objects.get("Contents", []):
+            s3.delete_object(Bucket=bucket, Key=obj["Key"])
+        logger.info("Staging directory removed: %s", output_dir)
+    else:
+        logger.info("Output written to: %s", output_dir)
+
+    return final_key_path, filename
 
 
 # ══════════════════════════════════════════════════════════════════════
