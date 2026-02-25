@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 class LineageTracker:
 
     def __init__(self, cfg):
-        self.enabled     = cfg.get("lineage.enabled", default=True)
-        self.logs_bucket = os.environ.get("LOGS_BUCKET", "")
-        self.prefix      = cfg.get("aws.s3.prefix_lineage", default="lineage/")
+        self.enabled           = cfg.get("lineage.enabled", default=True)
+        self.logs_bucket       = os.environ.get("LOGS_BUCKET", "")
+        self.prefix            = cfg.get("aws.s3.prefix_lineage", default="lineage/")
+        self.attribution_model = cfg.get("business_rules.attribution_model", default="first_touch")
 
     def record(self, **kwargs) -> dict:
         """
@@ -46,7 +47,7 @@ class LineageTracker:
             "dq_passed":        kwargs.get("dq_passed", False),
             "duration_seconds": round(kwargs.get("duration_seconds", 0.0), 2),
             "git_commit":       os.environ.get("GIT_COMMIT", "local"),
-            "attribution_model":"first_touch",
+            "attribution_model": self.attribution_model,
             "error":            kwargs.get("error", None),
         }
 

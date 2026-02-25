@@ -21,7 +21,7 @@ Parameters:
 
   LambdaMemoryMB:
     Type: Number
-    Default: 512
+    Default: 3008
     Description: Lambda memory allocation in MB
 
   LambdaTimeoutSeconds:
@@ -38,6 +38,8 @@ Resources:
 
   RawBucket:
     Type: AWS::S3::Bucket
+    # DependsOn required so NotificationConfiguration can reference Lambda
+    DependsOn: LambdaInvokePermission
     Properties:
       BucketName: !Sub "skp-raw-${Environment}-${AccountId}"
       PublicAccessBlockConfiguration:
@@ -51,13 +53,31 @@ Resources:
               SSEAlgorithm: AES256
       VersioningConfiguration:
         Status: Enabled
+      # ── S3 → Lambda event notification ──────────────────────────
+      # Triggers Lambda automatically when a file lands in raw/
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: "raw/"
+            Function: !GetAtt SKPLambdaFunction.Arn
       LifecycleConfiguration:
         Rules:
-          - Id: MoveToArchiveAfterProcessing
+          # Archive-prefix files: move to Glacier after 90 days
+          - Id: GlacierArchiveFiles
             Status: Enabled
+            Prefix: "archive/"
             Transitions:
-              - TransitionInDays: 7
+              - TransitionInDays: 90
                 StorageClass: GLACIER
+          # DQ error files: expire after 30 days
+          - Id: ExpireDQErrors
+            Status: Enabled
+            Prefix: "dq-errors/"
+            ExpirationInDays: 30
       Tags:
         - Key: Project
           Value: SKP
@@ -132,21 +152,42 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Read from raw bucket
+              # Read input files from raw/ prefix
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:GetObjectVersion
-                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/*"
-              # Write to processed and logs buckets
+                  - s3:HeadObject
+                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/raw/*"
+              # Write archive files (copy) and delete from raw/
               - Effect: Allow
                 Action:
                   - s3:PutObject
-                  - s3:PutObjectAcl
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/archive/*"
+              # Delete original from raw/ after archive copy succeeds
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/raw/*"
+              # Write DQ error records
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/dq-errors/*"
+              # Write DQ reports
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}/dq-reports/*"
+              # Write processed output and lineage/logs
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
                 Resource:
                   - !Sub "arn:aws:s3:::skp-processed-${Environment}-${AccountId}/*"
                   - !Sub "arn:aws:s3:::skp-logs-${Environment}-${AccountId}/*"
-              # List buckets (needed for some SDK operations)
+              # List buckets (needed for SDK head_bucket and list operations)
               - Effect: Allow
                 Action:
                   - s3:ListBucket
@@ -160,7 +201,9 @@ Resources:
   SKPLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "skp-search-keyword-performance-${Environment}"
+      # Function name is environment-agnostic; env is passed as APP_ENV variable.
+      # This matches the deployed function name: skp-search-keyword-performance
+      FunctionName: "skp-search-keyword-performance"
       Description: "Adobe SKP — Search Keyword Revenue Attribution Pipeline"
       Runtime: python3.12
       Handler: lambda_handler.handler
@@ -172,13 +215,14 @@ Resources:
           APP_ENV: !Ref Environment
           PROCESSED_BUCKET: !Ref ProcessedBucket
           LOGS_BUCKET: !Ref LogsBucket
+          RAW_BUCKET: !Sub "skp-raw-${Environment}-${AccountId}"
       Tags:
         - Key: Project
           Value: SKP
         - Key: Environment
           Value: !Ref Environment
 
-  # ── S3 Event Trigger — auto-invoke Lambda on file upload ─────────
+  # ── S3 → Lambda invoke permission ────────────────────────────────
 
   LambdaInvokePermission:
     Type: AWS::Lambda::Permission
@@ -186,14 +230,15 @@ Resources:
       FunctionName: !GetAtt SKPLambdaFunction.Arn
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
-      SourceArn: !GetAtt RawBucket.Arn
+      SourceAccount: !Ref AccountId
+      SourceArn: !Sub "arn:aws:s3:::skp-raw-${Environment}-${AccountId}"
 
   # ── CloudWatch Log Group ─────────────────────────────────────────
 
   LambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/skp-search-keyword-performance-${Environment}"
+      LogGroupName: "/aws/lambda/skp-search-keyword-performance"
       RetentionInDays: 30
 
 # ─────────────────────────────────────────────────────────────────────
@@ -228,3 +273,5 @@ Outputs:
   LambdaRoleArn:
     Description: Lambda execution role ARN
     Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "SKP-LambdaRole-${Environment}"

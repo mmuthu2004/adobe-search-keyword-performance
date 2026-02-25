@@ -1,32 +1,98 @@
 # =============================================================================
 # Environment Override — STAGING
-# Mirrors production settings with lower resource allocation.
+# =============================================================================
+# Staging is the final validation gate before production.
+# It mirrors production settings exactly so that any issue caught here
+# reflects a genuine production risk — not a staging-specific artefact.
+#
+# The only intentional deviations from prod are:
+#   - Separate bucket names (staging data must never mix with prod data)
+#   - Separate CloudWatch log group (keeps staging noise out of prod dashboards)
+#   - Spark executor count matches prod (cost is acceptable for pre-prod gate)
+#
+# Merge strategy: base config.yaml is deep-merged with this file.
+# Naming convention: skp-{purpose}-{env}-{account_id}
 # =============================================================================
 
+
+# -----------------------------------------------------------------------------
+# DATA QUALITY
+# Identical to production — staging must validate prod-equivalent quality rules.
+# Any DQ failure here would be a failure in prod too.
+# -----------------------------------------------------------------------------
 data_quality:
-  fail_on_schema_error: true
-  fail_on_null_critical: true
-  emit_quality_report: true
 
+  fail_on_schema_error:     true
+  fail_on_null_critical:    true
+
+  # Filename timestamp enforcement is ON in staging (mirrors prod).
+  # Test files must carry a full timestamp: <name>_YYYYMMDD_HHMMSS.tab
+  enforce_filename_date:    true
+
+  emit_quality_report:      true
+
+  # Same null warning threshold as prod — staging is a prod mirror.
+  null_warning_threshold_pct: 30
+
+
+# -----------------------------------------------------------------------------
+# PROCESSING
+# Matches prod routing threshold exactly so EMR handoff is validated in staging
+# before it is relied upon in production.
+# -----------------------------------------------------------------------------
 processing:
-  small_file_threshold_mb: 1024
-  spark:
-    num_partitions: 100
-    executor_memory: "2g"
-    log_level: "WARN"
+  small_file_threshold_mb: 1024   # Matches prod — validates EMR routing in pre-prod
 
+  spark:
+    num_partitions:     200        # Match prod — validates shuffle behaviour at scale
+    executor_memory:    "4g"       # Match prod — validates memory pressure scenarios
+    driver_memory:      "2g"
+    executor_cores:     4
+    dynamic_allocation: true
+    log_level:          "WARN"
+
+
+# -----------------------------------------------------------------------------
+# AWS
+# Staging uses dedicated buckets to ensure complete data isolation from prod.
+# Account ID suffix guarantees global uniqueness.
+# -----------------------------------------------------------------------------
 aws:
+
   region: "us-east-1"
+
   s3:
-    bucket_raw: "skp-raw-staging"
-    bucket_processed: "skp-processed-staging"
-    bucket_archive: "skp-archive-staging"
-    bucket_logs: "skp-logs-staging"
+    # Account ID suffix: 099622553872
+    bucket_raw:       "skp-raw-staging-099622553872"
+    bucket_processed: "skp-processed-staging-099622553872"
+    bucket_archive:   "skp-archive-staging-099622553872"
+    bucket_logs:      "skp-logs-staging-099622553872"
+
   lambda:
-    memory_mb: 512
+    timeout_seconds: 300
+    # Matches prod memory allocation — any OOM issue in prod must also surface in staging.
+    memory_mb: 3008
+
   cloudwatch:
+    # Dedicated log group keeps staging logs out of prod dashboards and alerts.
     log_group: "/skp/search-keyword-performance/staging"
 
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# Structured JSON logs in staging match prod format — validates log parsing
+# and CloudWatch Insights queries before they reach production.
+# -----------------------------------------------------------------------------
 logging:
-  level: "INFO"
+  level:      "INFO"
   structured: true
+
+
+# -----------------------------------------------------------------------------
+# LINEAGE
+# Lineage tracking is enabled in staging so the audit trail can be verified
+# before production go-live.
+# -----------------------------------------------------------------------------
+lineage:
+  enabled: true
+  store:   "s3"

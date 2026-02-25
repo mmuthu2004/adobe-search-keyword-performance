@@ -1,12 +1,37 @@
-# config.dev.yaml — Dev environment overrides
+# =============================================================================
+# Environment Override — DEVELOPMENT
+# =============================================================================
+# Local and CI development overrides for config.yaml (base).
+# Lower thresholds, relaxed naming enforcement, and local lineage storage
+# make iterative development and testing faster without affecting prod behaviour.
+#
+# Merge strategy: base config.yaml is deep-merged with this file.
+# Naming convention: skp-{purpose}-{env}-{account_id}
+# =============================================================================
+
 aws:
   s3:
+    # All four bucket keys overridden so the full config is consistent.
+    # bucket_archive is a prefix within raw bucket — included here for completeness.
     bucket_raw:       "skp-raw-dev-099622553872"
     bucket_processed: "skp-processed-dev-099622553872"
+    bucket_archive:   "skp-archive-dev-099622553872"
     bucket_logs:      "skp-logs-dev-099622553872"
 
 processing:
-  small_file_threshold_mb: 100
+  # Pure Python is not appropriate for files larger than ~50MB.
+  # Files above this threshold are routed to EMR Serverless (PySpark).
+  # Rationale: a 50MB .tab file can expand to 250–400MB in-memory as Python
+  # dicts (3–5x raw size), making EMR the correct engine for phase3+ data.
+  small_file_threshold_mb: 50
+
+data_quality:
+  # Filename timestamp enforcement is OFF in dev so test files without timestamps work.
+  # Set to true in prod — source systems must deliver files with a full timestamp:
+  # <name>_YYYYMMDD_HHMMSS.tab  e.g. hit_data_phase1_20260225_143000.tab
+  # Full timestamp (not just date) ensures uniqueness for daily, hourly, or any
+  # feed frequency without needing a naming convention change later.
+  enforce_filename_date: false
 
 logging:
   level: DEBUG

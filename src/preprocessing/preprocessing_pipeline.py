@@ -10,8 +10,11 @@ Orchestrates 4 checks:
   3. Null validation     — critical columns have no nulls
   4. Duplicate removal   — composite key deduplication
 
-Returns: (list of row dicts, dq_report dict)
-Each row dict has column names as keys, values as strings.
+Returns: (clean_rows, error_rows, dq_report)
+  clean_rows  — list of row dicts that passed all checks
+  error_rows  — list of row dicts that failed, each with an added
+                '_error_reason' column describing why it was rejected
+  dq_report   — dict with check results and summary stats
 """
 import csv
 import io
@@ -29,6 +32,23 @@ class NullValidationError(Exception):
 
 
 class PreprocessingPipeline:
+    """
+    Orchestrates all preprocessing and data quality checks on raw hit-level data.
+
+    Four sequential checks:
+      1. Schema validation  — all required columns present (fatal if missing)
+      2. CRLF normalisation — Windows line endings silently fixed before parsing
+      3. Null validation    — critical columns must not be empty (fatal if configured)
+      4. Duplicate removal  — composite-key dedup (always non-fatal; dupes become error rows)
+
+    Returns a 3-tuple: (clean_rows, error_rows, dq_report)
+      clean_rows  — list of dicts ready for SearchKeywordAnalyzer
+      error_rows  — list of dicts that failed checks, each tagged with '_error_reason'
+      dq_report   — dict with per-check results, row counts, and overall pass/fail
+
+    Zero external dependencies — standard library only (csv, io, logging).
+    Designed for the Lambda pure-Python execution path.
+    """
 
     def __init__(self, cfg):
         self.delimiter      = cfg.get("input.file_delimiter",              default="\t")
@@ -37,6 +57,9 @@ class PreprocessingPipeline:
         self.critical_cols  = cfg.require("data_quality.critical_columns")
         self.dedup_keys     = cfg.require("data_quality.duplicate_key_columns")
         self.fail_schema    = cfg.get("data_quality.fail_on_schema_error",  default=True)
+        # When True: raise NullValidationError if any critical column row is empty.
+        # When False: collect null rows as error_rows and continue processing.
+        # Prod default: True (config.yaml). Dev default: inherits True unless overridden.
         self.fail_null      = cfg.get("data_quality.fail_on_null_critical", default=True)
         self.warn_threshold = cfg.get("data_quality.null_warning_threshold_pct", default=50)
 
@@ -45,12 +68,14 @@ class PreprocessingPipeline:
         Run all preprocessing checks on raw file content string.
 
         Returns:
-            (rows, dq_report)
-            rows      — list of dicts, one per data row
-            dq_report — dict with check results and summary stats
+            (clean_rows, error_rows, dq_report)
+            clean_rows  — list of dicts that passed all checks
+            error_rows  — list of dicts that failed, with '_error_reason' column
+            dq_report   — dict with check results and summary stats
         """
         logger.info("=== Preprocessing Pipeline Start ===")
-        dq_report = {"checks": []}
+        dq_report  = {"checks": []}
+        error_rows = []
 
         # ── Step 0: CRLF normalisation ───────────────────────────────
         if self.strip_crlf:
@@ -67,11 +92,13 @@ class PreprocessingPipeline:
         logger.info("Parsed %d rows x %d columns.", total, len(cols))
 
         # ── Step 2: Schema validation ────────────────────────────────
+        # Schema is file-level — if columns are missing, tag ALL rows
+        # as schema errors and return immediately (nothing to process).
         missing = sorted(set(self.required_cols) - set(cols))
         schema_result = {
-            "check":   "schema_validation",
-            "passed":  len(missing) == 0,
-            "missing": missing,
+            "check":          "schema_validation",
+            "passed":         len(missing) == 0,
+            "missing":        missing,
             "actual_columns": cols,
         }
         dq_report["checks"].append(schema_result)
@@ -80,23 +107,53 @@ class PreprocessingPipeline:
             msg = f"Schema validation FAILED. Missing columns: {missing}"
             logger.error(msg)
             if self.fail_schema:
+                # Tag all rows as schema errors before raising
+                for row in rows:
+                    row["_error_reason"] = f"schema_error: missing columns {missing}"
+                    error_rows.append(row)
+                dq_report["overall_passed"] = False
+                dq_report["rows_in"]        = total
+                dq_report["rows_out"]       = 0
+                dq_report["error_count"]    = len(error_rows)
                 raise SchemaValidationError(msg)
         else:
-            logger.info("Schema validation PASSED. All %d required columns present.", len(self.required_cols))
+            logger.info(
+                "Schema validation PASSED. All %d required columns present.",
+                len(self.required_cols)
+            )
 
         # ── Step 3: Null validation ──────────────────────────────────
-        critical_failures = []
-        for col in self.critical_cols:
-            null_count = sum(1 for r in rows if not r.get(col, "").strip())
-            null_pct   = round(null_count / total * 100, 2) if total > 0 else 0
-            if null_count > 0:
-                critical_failures.append(col)
-                logger.error(
-                    "CRITICAL column '%s' has %d null(s) (%s%%) — pipeline cannot continue.",
-                    col, null_count, null_pct
-                )
+        # Row-level check — tag individual rows with null critical columns.
+        null_error_rows = set()  # track row indices already marked as errors
 
-        # Check non-critical columns for high null rates
+        for col in self.critical_cols:
+            for idx, row in enumerate(rows):
+                if not row.get(col, "").strip():
+                    null_error_rows.add(idx)
+                    # Append to error list with reason; preserve original row data
+                    error_row = dict(row)
+                    error_row["_error_reason"] = f"null_critical_column: {col}"
+                    error_rows.append(error_row)
+                    logger.debug("Row %d rejected — null in critical column '%s'.", idx, col)
+
+        if null_error_rows:
+            logger.error(
+                "Null validation: %d row(s) rejected for null in critical columns.",
+                len(null_error_rows)
+            )
+            # Halt pipeline if configured to fail hard on null critical columns.
+            # Lambda catches this as a 500 and logs it — input file stays in raw/
+            # so it can be investigated and reprocessed after the data issue is fixed.
+            if self.fail_null:
+                raise NullValidationError(
+                    f"Null validation FAILED. {len(null_error_rows)} row(s) have null "
+                    f"in critical columns {self.critical_cols}. "
+                    f"Set fail_on_null_critical: false in config to continue instead."
+                )
+        else:
+            logger.info("Null validation PASSED. No critical column nulls.")
+
+        # Check non-critical columns for high null rates (warn only, no rejection)
         for col in cols:
             if col in self.critical_cols:
                 continue
@@ -110,19 +167,17 @@ class PreprocessingPipeline:
 
         null_result = {
             "check":             "null_validation",
-            "passed":            len(critical_failures) == 0,
-            "critical_failures": critical_failures,
+            "passed":            len(null_error_rows) == 0,
+            "critical_failures": len(null_error_rows),
             "total_rows":        total,
         }
         dq_report["checks"].append(null_result)
 
-        if critical_failures and self.fail_null:
-            raise NullValidationError(
-                f"Null validation FAILED. Critical columns with nulls: {critical_failures}"
-            )
-        logger.info("Null validation PASSED. No critical column nulls.")
+        # Remove null error rows from clean set before dedup
+        rows = [row for idx, row in enumerate(rows) if idx not in null_error_rows]
 
         # ── Step 4: Duplicate removal ────────────────────────────────
+        # Tag duplicate rows as errors; keep first occurrence as clean.
         seen    = set()
         deduped = []
         for row in rows:
@@ -130,13 +185,18 @@ class PreprocessingPipeline:
             if key not in seen:
                 seen.add(key)
                 deduped.append(row)
+            else:
+                error_row = dict(row)
+                error_row["_error_reason"] = f"duplicate_row: key={key}"
+                error_rows.append(error_row)
+                logger.debug("Row rejected — duplicate key %s.", key)
 
-        dupes = total - len(deduped)
+        dupes = len(rows) - len(deduped)
         dq_report["checks"].append({
             "check":           "duplicate_check",
-            "passed":          True,
+            "passed":          True,   # duplicates are always non-fatal
             "duplicate_count": dupes,
-            "rows_before":     total,
+            "rows_before":     len(rows),
             "rows_after":      len(deduped),
         })
 
@@ -151,9 +211,11 @@ class PreprocessingPipeline:
         dq_report["overall_passed"] = all(c.get("passed", True) for c in dq_report["checks"])
         dq_report["rows_in"]        = total
         dq_report["rows_out"]       = len(rows)
+        dq_report["error_count"]    = len(error_rows)
 
         logger.info(
-            "=== Preprocessing Complete. Rows in: %d | Rows out: %d | All checks passed: %s ===",
-            total, len(rows), dq_report["overall_passed"]
+            "=== Preprocessing Complete. Rows in: %d | Clean: %d | "
+            "Errors: %d | All checks passed: %s ===",
+            total, len(rows), len(error_rows), dq_report["overall_passed"]
         )
-        return rows, dq_report
+        return rows, error_rows, dq_report
