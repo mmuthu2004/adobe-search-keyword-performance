@@ -22,3 +22,5 @@ tests/data/lambda_output.tab
 tests/data/lambda_phase2_output.tab
 tests/data/output_phase3/
 tests/data/output_phase4/
+.env.emr
+.env*

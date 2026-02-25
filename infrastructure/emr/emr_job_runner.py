@@ -131,7 +131,7 @@ def poll_job(emr_client, app_id, job_run_id, poll_interval=15, timeout=3600):
     EMR Serverless job states:
       SUBMITTED → PENDING → SCHEDULED → RUNNING → SUCCESS / FAILED / CANCELLED
     """
-    terminal_states = {"SUCCESS", "FAILED", "CANCELLED", "CANCELLING"}
+    terminal_states = {"SUCCESS", "FAILED", "CANCELLED"}
     start_time = time.time()
     last_state = None
 
