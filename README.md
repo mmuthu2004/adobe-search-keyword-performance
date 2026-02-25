@@ -239,6 +239,9 @@ adobe-search-keyword-performance/
 │   ├── processing/
 │   │   ├── search_keyword_analyzer.py   ← Core attribution engine (pure Python)
 │   │   └── spark_skp_pipeline.py        ← PySpark mirror of above; EMR entry point
+│   ├── sem_insights/
+│   │   ├── sem_extractor.py             ← Keyword-level SEM metrics (first-touch attribution)
+│   │   └── run_sem_insights.py          ← Standalone CLI runner; uploads to S3 Hive-partitioned
 │   ├── output/
 │   │   └── writer.py                    ← TSV writer + S3 upload
 │   ├── governance/
@@ -254,6 +257,7 @@ adobe-search-keyword-performance/
 │   ├── integration/
 │   │   ├── test_end_to_end.py           ← Full pipeline against sample data
 │   │   └── test_spark_parity.py         ← Spark output == Python output
+│   ├── test_sem_insights.py             ← 45 unit tests for SEM Insights (zero external deps)
 │   └── generate_test_data.py            ← Script to regenerate test fixtures
 │
 ├── infrastructure/
@@ -267,8 +271,9 @@ adobe-search-keyword-performance/
 │   └── workflows/
 │       └── cicd.yml                     ← CI (test + build) + CD (deploy to Lambda)
 │
-├── requirements.txt                     ← Lambda runtime deps (boto3, pyyaml)
-├── requirements-spark.txt               ← EMR/local Spark deps (pyspark, pytest)
+├── requirements.txt                     ← Lambda runtime deps (boto3==1.42.56, pyyaml==6.0.3)
+├── requirements-spark.txt               ← EMR/Spark runtime deps (pyspark==3.5.1, boto3, pyyaml)
+├── requirements-dev.txt                 ← Dev/test deps (pytest==9.0.2, pytest-timeout==2.4.0)
 ├── .flake8                              ← Linting configuration
 └── .gitignore
 ```
@@ -379,6 +384,39 @@ SHA-256 masks `ip` and `user_agent` before writing to DQ error files or logs. Or
 ```python
 from utils.pii_masker import mask
 mask("192.168.1.100")  # → "a3f5d2c1e8b94f7a..."
+```
+
+### `src/sem_insights/`
+
+Standalone SEM Insights module. Reads the same hit-level `.tab` files and produces keyword-level performance metrics beyond the core revenue report.
+
+```bash
+# Offline — local CSV only
+python -m src.sem_insights.run_sem_insights --no-s3
+
+# Upload to S3 (Hive-partitioned, same convention as main pipeline)
+python -m src.sem_insights.run_sem_insights --env dev
+```
+
+Output schema (11 columns):
+
+| Column | Description |
+|---|---|
+| `search_engine_domain` | Normalised domain (e.g. `google.com`) |
+| `search_keyword` | Lowercased keyword from referrer URL |
+| `total_clicks` | Total hits with this engine+keyword as referrer |
+| `unique_sessions` | Distinct IPs that arrived via this keyword |
+| `converting_sessions` | Sessions that ended in a purchase |
+| `total_revenue` | Revenue attributed via first-touch |
+| `conversion_rate` | `converting_sessions / unique_sessions × 100` |
+| `revenue_per_click` | `total_revenue / total_clicks` |
+| `avg_order_value` | `total_revenue / converting_sessions` |
+| `run_date` | UTC timestamp of the run |
+| `run_id` | Audit UUID |
+
+Output is written to:
+```
+s3://{processed_bucket}/processed/sem_insights/year=YYYY/month=MM/day=DD/sem_insights_YYYYMMDD.csv
 ```
 
 ---
@@ -656,11 +694,11 @@ python -m venv venv
 source venv/bin/activate          # Linux/macOS
 venv\Scripts\activate             # Windows
 
-# Install Lambda dependencies
+# Install Lambda runtime dependencies
 pip install -r requirements.txt
 
-# Install Spark dependencies (for local parity tests)
-pip install -r requirements-spark.txt
+# Install dev/test dependencies (pytest + Spark for parity tests)
+pip install -r requirements-dev.txt
 ```
 
 ### Environment Variables
@@ -703,11 +741,12 @@ spark-submit src/processing/spark_skp_pipeline.py \
 
 ### Test Suite Overview
 
-| Suite | Location | What it tests |
-|---|---|---|
-| Unit | `tests/unit/` | Config loader: loading, merging, env var substitution, error handling |
-| Integration | `tests/integration/test_end_to_end.py` | Full pipeline against 21-row sample; ground truth verification |
-| Parity | `tests/integration/test_spark_parity.py` | Spark output matches Python output byte-for-byte |
+| Suite | Location | Count | What it tests |
+|---|---|---|---|
+| Unit | `tests/unit/test_config_loader.py` | 27 | Config loading, merging, env var substitution, error handling |
+| Integration | `tests/integration/test_end_to_end.py` | 13 | Full pipeline against 21-row sample; ground truth verification |
+| Parity | `tests/integration/test_spark_parity.py` | 4 | Spark output matches Python output (skipped without PySpark) |
+| SEM Insights | `tests/test_sem_insights.py` | 45 | Referrer parsing, revenue extraction, attribution, edge cases |
 
 ### Running Tests
 
