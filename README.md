@@ -1036,6 +1036,72 @@ Fix: Replace `session_key_column` in `config.yaml` with a visitor ID or persiste
 implementation. The session key is fully config-driven — no code change required. If no better identifier is available, add a WARNING log when
 duplicate IPs with different user agents are detected in the same file, flagging potential cross-user collisions for the client's awareness.
 
+
+### Future Architecture Path:
+
+### Future Path — Enterprise Orchestration:
+
+Current: S3 → Lambda → Lambda/EMR (direct event-driven routing). This pattern is simple, serverless, and sufficient for the current
+scale and file volume.
+
+At enterprise scale — hundreds of daily files, complex retry logic,multi-step workflows with conditional branching — the recommended
+evolution is:
+
+S3 → EventBridge → Step Functions → Lambda / EMR Serverless
+
+Benefits this unlocks:
+- Step Functions manages state across the full pipeline lifecycle — submit, wait, succeed, fail, retry — without custom polling code
+- Each step (validate, route, process, archive, alert) becomes an explicit state with its own retry policy and failure handler
+- Failed executions are visible in the Step Functions console with full input/output at every step — no CloudWatch log archaeology
+- EventBridge decouples the S3 trigger from the orchestration layer, making it easy to add new event sources (Kinesis, SNS, scheduled)
+  without touching the pipeline logic
+  
+The current Lambda routing logic maps cleanly to a Step Functions state machine — this is an additive evolution, not a re-architecture.
+The business logic, DQ checks, and attribution engine remain unchanged.
+
+
+
+### Future Path — SEM Reconciliation with Ad Platform Invoice Data:
+
+The pipeline currently answers "which keywords drove revenue" from the client's own hit data. The natural next step is ingesting Google Ads
+and Bing Ads invoice data alongside the hit-level file and reconciling billed clicks against recorded sessions per keyword.
+
+Example insight this unlocks:
+
+"Google billed 500 clicks on 'ipod'. We recorded 480 sessions. 
+Investigate 20 discrepancies — potential tracking gap or billing error."
+
+This is a common enterprise problem and a high-value client deliverable.The current architecture already supports it — the invoice data becomes
+an additional input source. No pipeline re-architecture required.
+
+### Future Path — Output Format Evolution to Parquet:
+
+The current output is TSV — correct per spec and human-readable.At scale, converting to Parquet unlocks significant downstream value:
+
+- 10x compression — 10 GB of TSV becomes ~1 GB on S3
+- Columnar storage — Athena queries scan only the columns needed,not full rows
+- Schema enforcement — data type errors caught at write time
+- Predicate pushdown — query by date, keyword, or domain without full table scan across years of history
+
+The Hive-style partitioning (year=/month=/day=/) is already in place. Converting to Parquet is an output format change only — zero changes
+to the attribution logic or pipeline architecture.
+
+### Future Path — Pluggable Attribution Models:
+
+The current model is first-touch — the first search engine visit per session receives 100% of the revenue credit. This is the right starting
+point but limits the depth of insight available to the client.
+
+The attribution model is already config-driven (`attribution_model` in `config.yaml`). Adding new models requires only a new code path in
+`search_keyword_analyzer.py` — no architectural change:
+
+- Linear: revenue split equally across all search touches in the session
+- Time-decay: touches closer to the purchase receive proportionally more credit
+- Last-touch: the final search engine visit before purchase gets full credit
+ 
+ Offering multiple models allows the client to compare attribution strategies and make more informed decisions about which keywords and
+channels to invest in.
+
+
 ## Appendix — Input File Format
 
 Tab-delimited hit-level data file. Required columns:
