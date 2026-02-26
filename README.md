@@ -987,6 +987,54 @@ Common causes:
 4. Run the integration test: `PYTHONPATH=src python -m pytest tests/integration/test_end_to_end.py -v`
 
 ---
+## 17. Known Limitations & Production Improvements
+
+### Non-Atomic Output Writes
+
+Issue: The output TSV is written directly to the final S3 key. If Lambda crashes mid-upload, a partial file lands at the final key. Downstream
+consumers reading on a schedule may process corrupt data with no indicati on
+anything is wrong.
+
+Fix: Write output to `processed/tmp/{uuid}.tab` first. On confirmed success,copy to the final key `processed/{phase}/year=.../YYYY-MM-DD_SearchKeywordPerformance.tab`
+then delete the tmp object. S3 copy is atomic — the final key either exists complete or does not exist at all. Partial writes never reach consumers.
+
+### Lambda /tmp Storage Not Validated Against File Size Issue
+
+Issue : The production routing threshold is 1024 MB. Lambda's default ephemeral storage (/tmp) is 512 MB. A file between 512 MB and 1024 MB is routed to the Lambda path, attempts to download to /tmp, and fails
+with an unclear out-of-space error. The file sits unprocessed in raw/ with no alert and no lineage record.
+
+Fix: Before downloading, compare file size against available ephemeral storage using `context.memory_limit_in_mb` and the configured
+`/tmp` allocation. If insufficient, route to EMR regardless of the size threshold. Alternatively, configure Lambda ephemeral storage
+explicitly to 10 GB (maximum) and align the prod threshold accordingly.
+
+### No Concurrency Controls on Parallel File Arrivals : 
+
+Issue: S3 fires one Lambda invocation per file. If 50 files land simultaneously, 50 Lambdas spawn in parallel and potentially submit
+50 concurrent EMR jobs. EMR Serverless has a default concurrent job limit. Mass parallel submissions can hit IAM API throttle limits,
+exhaust EMR capacity, and generate an unexpected cost spike — all with no circuit breaker.
+
+Fix: Replace direct S3 → Lambda trigger with S3 → SQS → Lambda. Set Lambda reserved concurrency on the SQS event source mapping to
+control maximum parallel executions. The queue absorbs burst volume and the pipeline processes files at a controlled rate regardless of
+upstream delivery pattern.
+
+### Lineage Record Written Before Pipeline Completion:
+
+Issue: The lineage record is written optimistically — before output upload and archival are confirmed complete. If the pipeline fails
+after lineage is written, the audit record shows a successful run that never actually completed. In a client-facing or regulated
+context this is a compliance risk, not just a bug.
+
+Fix: Write lineage last — after output upload is confirmed and input file is moved to archive/. Add a `status` field to the lineage record
+(`success`, `failed`, `partial`) and write a failure record in the exception handler so every run has an audit entry regardless of outcome.
+
+### Session Key — IP Address Limitation
+
+Issue: The session key is the visitor's IP address — the best available identifier in this dataset. Shared IPs (corporate NAT gateways,
+university networks, mobile carriers) cause cross-user attribution errors. Two visitors sharing an IP will have their sessions merged —
+one visitor's purchase credited to the other's search keyword. At scale this silently skews revenue attribution without any error or warning.
+
+Fix: Replace `session_key_column` in `config.yaml` with a visitor ID or persistent cookie column if available in the client's Adobe Analytics
+implementation. The session key is fully config-driven — no code change required. If no better identifier is available, add a WARNING log when
+duplicate IPs with different user agents are detected in the same file, flagging potential cross-user collisions for the client's awareness.
 
 ## Appendix — Input File Format
 
