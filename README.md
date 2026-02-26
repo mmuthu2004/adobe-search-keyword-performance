@@ -25,6 +25,8 @@
 14. [Infrastructure](#14-infrastructure)
 15. [Security](#15-security)
 16. [Troubleshooting](#16-troubleshooting)
+17. [Known Limitations & Production Improvements](#17-known-limitations--production-improvements)
+18. [Future Paths](#18-future-paths)
 
 ---
 
