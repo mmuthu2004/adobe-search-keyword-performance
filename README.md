@@ -1039,7 +1039,7 @@ implementation. The session key is fully config-driven — no code change requir
 duplicate IPs with different user agents are detected in the same file, flagging potential cross-user collisions for the client's awareness.
 
 
-### Future Architecture Path:
+## 18. Future Architecture Path
 
 ### Future Path — Enterprise Orchestration:
 
